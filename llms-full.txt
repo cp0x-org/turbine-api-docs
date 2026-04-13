@@ -1,9 +1,5 @@
 # turbine-api-docs — Full reference (auto-generated concatenation)
 
-This is a single-file dump of every markdown document in this
-repository, in reading order. For use with AI tools that prefer
-one large context file. Original pages are under docs/.
-
 Source: https://github.com/cp0x-org/turbine-api-docs
 License: CC-BY-4.0
 
@@ -24,6 +20,18 @@ Community-maintained reference for the **Turbine Alpha** HTTP API by
 > is in Alpha and the API may change without notice. For official
 > information see [docs.propellerheads.xyz](https://docs.propellerheads.xyz)
 > (Turbine Docs listed as "soon" at the time of writing).
+
+## For AI agents / LLMs
+
+- **[llms.txt](llms.txt)** — this repo follows the
+  [llmstxt.org](https://llmstxt.org) convention. Machine-readable
+  index of every page with a one-sentence description. Point your
+  tool at this file to discover the rest.
+- **[llms-full.txt](llms-full.txt)** — all documentation
+  concatenated into a single plain-text file (~1900 lines), suitable
+  for loading into an LLM context window whole.
+- **[examples/minimal_client.py](examples/minimal_client.py)** — a
+  self-contained Python reference you can copy as a starting point.
 
 ## Why this exists
 
@@ -1243,13 +1251,17 @@ If you wrote your state machine guessing `"active"` or `"open"` or
 `"RESTING"`, it will silently not transition. Normalize with
 `.lower()` on read, or match case-exact.
 
-Other enum values we expect based on the SDK TypeScript typing but
-have **not observed** yet:
+Verified status values:
+
+* `"Active"` — resting in the book, no fills
+* `"Expired"` — past `endTime`, auto-expired by the solver
+
+Other values we expect from the SDK's TypeScript typing but have
+**not directly observed** yet:
 
 * `"Filled"` — fully executed
 * `"PartiallyFilled"` — some execution history, still active
 * `"Cancelled"` — user or server cancelled
-* `"Expired"` — past `endTime`
 
 If you observe any of these in the wild, please PR to update this
 file.

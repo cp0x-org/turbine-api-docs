@@ -118,13 +118,17 @@ If you wrote your state machine guessing `"active"` or `"open"` or
 `"RESTING"`, it will silently not transition. Normalize with
 `.lower()` on read, or match case-exact.
 
-Other enum values we expect based on the SDK TypeScript typing but
-have **not observed** yet:
+Verified status values:
+
+* `"Active"` — resting in the book, no fills
+* `"Expired"` — past `endTime`, auto-expired by the solver
+
+Other values we expect from the SDK's TypeScript typing but have
+**not directly observed** yet:
 
 * `"Filled"` — fully executed
 * `"PartiallyFilled"` — some execution history, still active
 * `"Cancelled"` — user or server cancelled
-* `"Expired"` — past `endTime`
 
 If you observe any of these in the wild, please PR to update this
 file.
