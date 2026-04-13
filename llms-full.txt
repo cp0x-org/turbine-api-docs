@@ -1,0 +1,1863 @@
+# turbine-api-docs — Full reference (auto-generated concatenation)
+
+This is a single-file dump of every markdown document in this
+repository, in reading order. For use with AI tools that prefer
+one large context file. Original pages are under docs/.
+
+Source: https://github.com/cp0x-org/turbine-api-docs
+License: CC-BY-4.0
+
+==============================================================
+# README.md
+==============================================================
+
+# turbine-api-docs
+
+Community-maintained reference for the **Turbine Alpha** HTTP API by
+[PropellerHeads](https://propellerheads.xyz).
+
+> **Disclaimer.** This is **not** official documentation. It is a
+> reverse-engineered reference reconstructed from the public
+> `app.turbine.exchange` JavaScript source map (shipped with source
+> maps enabled as of 2026-04-13) and verified against the live
+> production API. Accuracy reflects observations on that date; Turbine
+> is in Alpha and the API may change without notice. For official
+> information see [docs.propellerheads.xyz](https://docs.propellerheads.xyz)
+> (Turbine Docs listed as "soon" at the time of writing).
+
+## Why this exists
+
+PropellerHeads ship Turbine as a private-beta Alpha with the front-end
+at `app.turbine.exchange` and no public SDK documentation. If you are
+a developer, a market maker, an AI agent, or an integrator trying to
+understand the API shape without re-deriving it yourself, this repo
+saves you a few hours.
+
+## What's in here
+
+- **[docs/overview.md](docs/overview.md)** — what Turbine is, who the
+  executor is, where settlement happens
+- **[docs/authentication.md](docs/authentication.md)** — SIWE flow
+  (`/nonce` → `personal_sign` → `/verify`), cookie session
+- **[docs/api-reference.md](docs/api-reference.md)** — every endpoint
+  with payloads: `/config`, `/status`, `/nonce`, `/verify`, `/me`,
+  `/logout`, `/add_order`, `/add_orders`, `/cancel_order`,
+  `/order_states`, `/order_fees`, `/add_liquidity`, `/remove_liquidity`,
+  `/liquidity_intent_states`
+- **[docs/orders.md](docs/orders.md)** — `OrderIntent` field semantics,
+  `midPriceDelta` bps meaning, partial fills, expiry, salt, minimum
+  order size
+- **[docs/permit2.md](docs/permit2.md)** — on-chain ERC-20 approval,
+  `PermitSingle` EIP-712 typed-data signing, nonce semantics, settler
+  as spender
+- **[docs/wire-format.md](docs/wire-format.md)** — the non-obvious bits:
+  hex-prefixed bigint serialization, the `yParity` bool-vs-string split
+  between `/verify` and `/add_order`, `status` enum case, bigint
+  representation choices
+- **[docs/fees.md](docs/fees.md)** — **the platform fee, how it is
+  computed, and how it interacts with spread**
+- **[examples/minimal_client.py](examples/minimal_client.py)** — a
+  self-contained Python reference client
+
+## Quick reference (one-pager)
+
+- **Base URL:** `https://api.turbine.exchange/api`
+- **Chain:** Ethereum mainnet (chainId 1)
+- **Auth:** SIWE `personal_sign`, session in HTTP cookie
+- **Orders:** signed only via Permit2 `PermitSingle` (the `OrderIntent`
+  itself is **not** EIP-712 signed)
+- **Minimum order size:** **$30 USD** (enforced server-side with
+  HTTP 400 `INPUT_VALIDATION_ERROR`)
+- **Platform fee:** ~**0.99 bps** (0.0099%) of the mid-price notional,
+  flat across size / side / delta — see [docs/fees.md](docs/fees.md)
+- **BigInt wire format:** hex strings with `0x` prefix in responses;
+  input accepts both decimal and hex
+- **Polling:** `/order_states` is the primary fill source; the
+  official JS SDK polls every 6 s with a client-side concurrency lock
+- **Status enum seen in the wild:** `"Active"` (TitleCase) for resting
+  orders; other values inferred but not yet verified
+
+## Known contract addresses (Ethereum mainnet, 2026-04-13)
+
+| Role | Address |
+|------|---------|
+| Turbine Settler | `0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac` |
+| Turbine Signer (gas-paying executor) | `0x89c740fea6bd1df86d0f8dff3f4c4c23cb598890` |
+| LP Hook | `0x40bd6d8c59d43f6c345d79b17234d9b0e781a088` |
+| LP Router | `0x4bd3f2ffc321f3ba4c3b31708212b76922f805a2` |
+| Uniswap v4 Pool Manager | `0x000000000004444c5dc75cb358380d2e3de08a90` |
+| Permit2 (standard Uniswap) | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
+
+**Pin these.** The `/api/config` endpoint returns them — verify the
+returned values against these pins on every startup. A mismatch
+indicates an API / deployment change and your client should halt.
+
+## Supported tokens
+
+The SDK constants ship with: USDC, USDT, DAI, UNI, WETH, WEETH, PEPE,
+WBTC. The `app.turbine.exchange` UI at the time of writing only
+exposes USDC / WETH, but the SDK and server accept any registered
+token pair.
+
+## Accuracy and contributions
+
+Everything here was verified by sending real (or quote-only) requests
+against production Turbine on 2026-04-13. If you spot something that
+has changed or is wrong, please open an issue or PR —
+[CONTRIBUTING.md](CONTRIBUTING.md) has the process.
+
+## License
+
+[CC-BY-4.0](LICENSE). Free to share and adapt with attribution.
+Backlink to this repository when copying substantial portions.
+
+## Trademarks
+
+"Turbine", "PropellerHeads", "Tycho", "Fynd" are marks of
+PropellerHeads. This project is **not affiliated with, endorsed by, or
+sponsored by PropellerHeads**. The name is used descriptively only.
+
+==============================================================
+# docs/overview.md
+==============================================================
+
+# Turbine overview
+
+**Turbine** is an intent-based decentralized exchange built by
+[PropellerHeads](https://propellerheads.xyz). It is described by the
+team as "**the first dark solver**" — an off-chain orderbook + solver
+running inside a confidential computing environment (Phala dstack /
+TDX) that matches user intents against internal LPs, peer orders,
+and fallback AMM liquidity.
+
+This page captures what an integrator needs to know; it does not
+duplicate PropellerHeads' own marketing. For that see
+[propellerheads.xyz](https://propellerheads.xyz) and
+[docs.propellerheads.xyz](https://docs.propellerheads.xyz).
+
+## Core idea
+
+A user signs an **intent** off-chain that expresses *"I want to trade
+up to X of token A for at least Y of token B, within price tolerance Δ,
+expiring at time T"*. Turbine's TEE-resident solver takes that intent
+and decides how and when to execute it. Users do not submit on-chain
+transactions themselves; they only sign messages.
+
+The settlement — actually moving the tokens on-chain — is performed
+by a dedicated **executor wallet** that PropellerHeads operates and
+funds with ETH for gas. From a user perspective this means:
+
+* **You sign but you don't pay gas.** Settlement gas is paid by the
+  executor, not by your wallet. You only pay the real trade cost and
+  the platform fee (see [fees.md](fees.md)).
+* **You never broadcast a transaction.** Turbine handles all
+  on-chain mechanics.
+
+## What you actually control
+
+The user — or your bot — controls three things per order:
+
+1. **Token pair, amount, and direction** — what you want to trade.
+2. **`midPriceDelta` in basis points** — your price tolerance relative
+   to the current mid-price. Negative means "I want better than mid"
+   (market maker / earn side). Positive means "I tolerate worse than
+   mid" (taker / fast). Range is `-10000` to `+10000` (±100%).
+3. **Expiry** — `start_time` / `end_time` Unix seconds. Orders
+   typically last up to an hour.
+
+Everything else (matching, order book position, execution timing,
+gas optimisation) is the solver's problem.
+
+## The three-contract on-chain surface
+
+Despite being an off-chain solver, Turbine has a small on-chain
+footprint you will interact with when setting up or monitoring
+positions:
+
+| Contract | Role |
+|---|---|
+| **Permit2** (`0x0000…3ac78BA3`) | Standard Uniswap Permit2. You approve this at the ERC-20 level, then sign per-order `PermitSingle` messages off-chain. Executor calls `transferFrom` through Permit2 at settlement time. |
+| **Turbine Settler** (`0x49e9…73aC`) | The contract that receives the final `settle(...)` call from the executor. This is the `spender` in your signed `PermitSingle`. |
+| **Turbine Signer / Executor** (`0x89c7…8890`) | The EOA that pays gas and submits settlement transactions. Monitor its balance if you are market-making — if it goes dark, your orders stop settling. |
+| **LP Hook / Router / Pool Manager** | Only relevant if you interact with Turbine's Uniswap-v4-style LP surface. Not needed for plain intents. |
+
+See [permit2.md](permit2.md) for the exact ERC-20 approval and signing
+flow, and [api-reference.md](api-reference.md) for the
+`GET /api/config` endpoint that returns these addresses (and which you
+should pin).
+
+## The executor (operational reality)
+
+The executor wallet is a **single EOA** that signs and submits every
+Turbine settlement. At the time of this writing (2026-04-13) we
+observe:
+
+* Nonce ~137 over the wallet's entire lifetime — small total Alpha
+  volume.
+* Balance around ~0.0045 ETH at most observations, indicating
+  **just-in-time funding** (PropellerHeads tops up shortly before
+  they need to settle).
+* Settlement transactions batch multiple orders into one tx where
+  possible; the actual on-chain method selector is `0xfdcc8090`
+  (`settle` on the Turbine Settler contract).
+
+If you run an automated client, treat executor balance as a soft
+signal — warn when it drops below ~0.01 ETH, but do not halt on it
+(you do not control it). The [bot we built for our own MM
+experiment](https://github.com/illlefr4u/turbine-apy) uses a 5-minute
+periodic executor-balance poll and surfaces warnings only.
+
+## Alpha caveats
+
+* **Private-beta volume.** Fill probability at competitive spreads
+  (e.g. 5–10 bps) is low; expect individual orders to rest tens of
+  minutes to hours.
+* **Single supported chain.** Ethereum mainnet only.
+* **Maximum pending orders.** The front end hard-codes
+  `turbineMaxPendingOrders = 5`. The server likely does not enforce
+  this, but exceeding it is a good way to get yourself flagged.
+* **Minimum order size.** Server rejects anything worth less than
+  **$30 USD** with `HTTP 400 INPUT_VALIDATION_ERROR` — see
+  [orders.md](orders.md).
+* **No public changelog.** The backend can (and did during our
+  integration) change enum spellings and serialization details. Pin
+  the `/api/config` fields and validate responses strictly.
+
+==============================================================
+# docs/authentication.md
+==============================================================
+
+# Authentication — SIWE over cookies
+
+Turbine uses **SIWE (Sign-In With Ethereum, [EIP-4361](https://eips.ethereum.org/EIPS/eip-4361))**
+for authentication. Session state lives in an HTTP cookie set by the
+server; subsequent requests to authenticated endpoints must be sent
+with that cookie (`credentials: "include"` in the browser, a
+persistent `requests.Session()` in Python).
+
+## Flow
+
+```
+        Client                                Server
+        ------                                ------
+ 1.  POST /api/nonce         ───────────►
+                             ◄───────────  200 OK, body = "<nonce string>"
+                                           Set-Cookie: <session>
+
+ 2.  build SIWE message
+     personal_sign(message)
+
+ 3.  POST /api/verify        ───────────►
+       { message, signature }
+                             ◄───────────  200 OK
+                                           Set-Cookie: <authenticated session>
+
+ 4.  GET /api/me             ───────────►
+                             ◄───────────  { authenticated: true, address: "0x..." }
+```
+
+## Step 1: `POST /api/nonce`
+
+Empty body. Response is a JSON string (not an object):
+
+```
+"b3a9f0e1c8d7..."
+```
+
+Save the nonce for the next step.
+
+## Step 2: build the SIWE message
+
+Construct the message *exactly* per the EIP-4361 template.
+`app.turbine.exchange` uses `viem`'s `createSiweMessage` which emits
+the following shape:
+
+```
+app.turbine.exchange wants you to sign in with your Ethereum account:
+0x1111111111111111111111111111111111111111
+
+Sign in to Turbine with your Ethereum wallet
+
+URI: https://api.turbine.exchange/api
+Version: 1
+Chain ID: 1
+Nonce: <nonce from step 1>
+Issued At: 2026-04-13T00:00:00.000Z
+```
+
+Fields:
+
+* **Domain** (line 1): must be `app.turbine.exchange`. Pin this.
+* **Address** (line 2): EIP-55 checksummed wallet address.
+* **Statement** (line 4): must be exactly
+  `"Sign in to Turbine with your Ethereum wallet"`.
+* **URI**: `https://api.turbine.exchange/api`. Pin this.
+* **Version**: `"1"`.
+* **Chain ID**: `1` for Ethereum mainnet.
+* **Nonce**: the string returned by `/api/nonce`.
+* **Issued At**: ISO-8601 UTC timestamp with millisecond precision.
+  Required by EIP-4361.
+
+## Step 3: sign with `personal_sign`
+
+Use **EIP-191 / `personal_sign`**, *not* EIP-712. In `eth_account`:
+
+```python
+from eth_account.messages import encode_defunct
+
+encoded = encode_defunct(text=siwe_message)
+signed = account.sign_message(encoded)
+sig_bytes = signed.signature  # 65 bytes: r (32) + s (32) + v (1)
+```
+
+In a browser wallet that means `personal_sign` / `eth_sign` with
+string input, not `eth_signTypedData_v4`.
+
+## Step 4: `POST /api/verify`
+
+Body is a JSON object:
+
+```json
+{
+  "message": "<the SIWE string exactly as signed>",
+  "signature": {
+    "r": "0xab…",
+    "s": "0xcd…",
+    "yParity": "0x0",
+    "v": "0x1b"
+  }
+}
+```
+
+Signature field details:
+
+* `r`, `s` — hex-encoded 32-byte components, `0x`-prefixed.
+* `v` — hex-encoded recovery id as `"0x1b"` (27) or `"0x1c"` (28).
+* `yParity` — **hex string** `"0x0"` (for `v == 27`) or `"0x1"`
+  (for `v == 28`) on this endpoint.
+
+> **Wire-format pitfall.** The same field is sent differently on
+> `/api/verify` and on `/api/add_order`. Here on `/verify` it is a
+> **string**. On `/add_order` inside `signedPermit.signature` it is a
+> **JSON boolean** `true` / `false`. Sending the bool to `/verify`
+> or the string to `/add_order` produces a 422. See
+> [wire-format.md](wire-format.md) for the full analysis.
+
+Successful `/verify` returns HTTP 200 and sets the authenticated
+session cookie. The body is not used.
+
+## Step 5: confirm with `GET /api/me`
+
+```json
+{
+  "authenticated": true,
+  "address": "0x1111111111111111111111111111111111111111"
+}
+```
+
+The address comes back **lowercased**; do a case-insensitive
+comparison against your wallet.
+
+## Session lifetime
+
+We have not measured the cookie expiration window. The JS SDK
+transparently re-authenticates whenever `/me` returns
+`authenticated: false`, so a safe pattern is:
+
+1. Try the request.
+2. On HTTP 401 (or `/me` saying false), re-run the SIWE flow.
+3. Retry the original request with the fresh cookie.
+
+Serialize the re-auth flow with a mutex if you have multiple threads
+sharing a client — Turbine's `/nonce` + `/verify` pair is single-use
+per nonce, so two concurrent auth attempts will race.
+
+## Logout
+
+```
+POST /api/logout     (no body)
+```
+
+Clears the session server-side. Your cookie jar should also clear.
+
+==============================================================
+# docs/api-reference.md
+==============================================================
+
+# API reference
+
+Base URL: `https://api.turbine.exchange/api`
+
+All authenticated endpoints (everything except `/status` and `/config`)
+require a valid SIWE session cookie — see
+[authentication.md](authentication.md).
+
+All request and response bodies are JSON unless stated otherwise.
+
+Bigint fields in responses are serialized as `0x`-prefixed hex strings
+(the official JS SDK's `bigIntReplacer`). Input accepts both decimal
+and hex strings; strictly hex for inputs is safer because the SDK
+uses it. See [wire-format.md](wire-format.md).
+
+## Unauthenticated
+
+### `GET /api/status`
+
+Health check. Returns text `"OK from Turbine"` with HTTP 200.
+
+### `GET /api/config`
+
+Returns the runtime contract addresses and SIWE fields. Call this on
+every startup, verify the returned values against hard-coded pins,
+and halt if they do not match.
+
+```json
+{
+  "turbineSettlerAddress": "0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac",
+  "turbineSignerAddress": "0x89c740fea6bd1df86d0f8dff3f4c4c23cb598890",
+  "lpHookAddress": "0x40bd6d8c59d43f6c345d79b17234d9b0e781a088",
+  "lpRouterAddress": "0x4bd3f2ffc321f3ba4c3b31708212b76922f805a2",
+  "poolManagerAddress": "0x000000000004444c5dc75cb358380d2e3de08a90",
+  "submitSettlements": true,
+  "siweDomain": "app.turbine.exchange",
+  "siweUri": "https://api.turbine.exchange/api"
+}
+```
+
+## Authentication
+
+### `POST /api/nonce`
+
+No body. Returns a JSON string:
+
+```json
+"b3a9f0e1c8d7a6b5..."
+```
+
+Consume it in the next `/verify` call — nonces are single-use.
+
+### `POST /api/verify`
+
+Body:
+
+```json
+{
+  "message": "<SIWE message text>",
+  "signature": {
+    "r": "0x...",
+    "s": "0x...",
+    "yParity": "0x0",
+    "v": "0x1b"
+  }
+}
+```
+
+Empty-body 200 on success, sets cookie. See
+[authentication.md](authentication.md) for full details.
+
+### `GET /api/me`
+
+```json
+{
+  "authenticated": true,
+  "address": "0x1111111111111111111111111111111111111111"
+}
+```
+
+### `POST /api/logout`
+
+No body. Clears the server-side session.
+
+## Orders (authenticated)
+
+### `POST /api/add_order`
+
+Submit a single order. Body for standard (non-smart-callback) orders:
+
+```json
+{
+  "order": {
+    "owner": "0x1111111111111111111111111111111111111111",
+    "sellToken": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    "buyToken":  "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "sellAmount":    "16000000000000000",
+    "minBuyAmount":  "33000000",
+    "midPriceDelta": -10,
+    "startTime":     "1776048000",
+    "endTime":       "1776051600",
+    "partialFill":   true,
+    "callData":      "0x",
+    "callDataTarget":"0x0000000000000000000000000000000000000000",
+    "salt":          "0x1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "signedPermit": {
+    "signature": {
+      "r":       "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "s":       "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "yParity": false,
+      "v":       "0x1b"
+    },
+    "permit": {
+      "details": {
+        "token":      "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        "amount":     "1461501637330902918203684832716283019655932542975",
+        "expiration": 1776051600,
+        "nonce":      0
+      },
+      "spender":     "0x49E9A8EA9B6C05d5B2307538D159350A5aEa73aC",
+      "sigDeadline": "1776051600"
+    }
+  }
+}
+```
+
+Response:
+
+```json
+{ "orderHash": "0x1111111111111111111111111111111111111111111111111111111111111111" }
+```
+
+Important details:
+
+* **`signedPermit.signature.yParity` is a JSON boolean** (`true` or
+  `false`). Sending a string `"0x0"`/`"0x1"` fails with HTTP 422.
+  This is different from `/verify` — see
+  [wire-format.md](wire-format.md).
+* **Minimum order size is enforced at $30 USD**. Smaller values fail
+  with HTTP 400 `INPUT_VALIDATION_ERROR` and a message like
+  `"Sell amount X is worth ~$19.97 which is less than $30"`.
+* **`midPriceDelta` is a signed int**, not a string. Negative values
+  (MM "earn" side) and positive values (taker "fast" side) are both
+  valid. Range `-10000..+10000` = ±100%.
+* **Permit2 `amount`** in the example is `maxUint160 = 2^160 - 1`
+  (unlimited approval); you can specify a tighter amount if you want
+  per-order cap.
+* **`callData` / `callDataTarget`** non-empty makes this a "smart
+  order"; then `signedPermit` is omitted — see the smart-order section
+  below.
+
+### `POST /api/add_orders`
+
+Same payload wrapped in an array. Response is an array of
+`{ orderHash }`. Each order is independently signed with its own
+Permit2 permit.
+
+### `POST /api/cancel_order`
+
+```json
+{ "orderHash": "0x1111111111111111111111111111111111111111111111111111111111111111" }
+```
+
+Response:
+
+```json
+{ "orderHash": "0x1111111111111111111111111111111111111111111111111111111111111111" }
+```
+
+### `POST /api/order_states`
+
+```json
+{ "orderHashes": [ "0x...", "0x..." ] }
+```
+
+Response is an array:
+
+```json
+[
+  {
+    "hash": "0x...",
+    "status": "Active",
+    "execution": [
+      {
+        "tx_hash":           "0x...",
+        "block_number":      18123456,
+        "sold_amount":       "0x1a",
+        "bought_amount":     "0x2c",
+        "surplus_buy_amount":"0x0"
+      }
+    ]
+  }
+]
+```
+
+`status` strings seen in the wild:
+
+* **`"Active"`** — resting in the book, no fills yet.
+
+Other enum values (`Filled`, `PartiallyFilled`, `Cancelled`, `Expired`)
+are inferred from the SDK's TypeScript typing but **not directly
+verified** at the time of writing. Please PR if you observe them.
+
+`execution[].sold_amount` / `bought_amount` / `surplus_buy_amount` are
+hex-prefixed bigint strings — parse with a base-0 int parser.
+
+### `POST /api/order_fees`
+
+Quote the platform fee for a prospective order **without** submitting
+it. Body is the raw `OrderIntent` (no `signedPermit`):
+
+```json
+{
+  "owner": "0x...",
+  "sellToken": "0x...",
+  ...
+}
+```
+
+Response is a hex-prefixed bigint string denominated in the **buy
+token's atomic units**:
+
+```json
+"0xd8d"
+```
+
+Value is `0xd8d = 3469` atomic units in the example. See
+[fees.md](fees.md) for how to interpret this — spoiler: it works out
+to ~0.99 bps (0.0099%) of the mid-price notional, flat.
+
+## Liquidity endpoints (LP side)
+
+### `POST /api/add_liquidity`
+
+```json
+{
+  "addLiquidity": { /* AddLiquidityIntent */ },
+  "permitTokens": {
+    "signature": { "r": "0x...", "s": "0x...", "yParity": false, "v": "0x1b" },
+    "permit":    { /* PermitBatch */ }
+  }
+}
+```
+
+### `POST /api/remove_liquidity`
+
+```json
+{
+  "removeLiquidity": { /* RemoveLiquidityIntent */ },
+  "permitLpToken": {
+    "signature": { "r": "0x...", "s": "0x...", "yParity": false, "v": "0x1b" },
+    "permit":    { /* PermitSingle */ }
+  }
+}
+```
+
+### `POST /api/liquidity_intent_states`
+
+```json
+{ "intentHashes": ["0x...", "0x..."] }
+```
+
+Response:
+
+```json
+[
+  { "hash": "0x...", "status": "Pending" }
+]
+```
+
+Known statuses per the SDK's `LiquidityIntentStatus` enum:
+`Pending`, `Invalid`, `Expired`, `Executed`, `PendingCancellation`,
+`Canceled`.
+
+LP details (reserve reads, pool registration, permit batch signing)
+happen on-chain via the `lpHookAddress` and `lpRouterAddress`
+contracts — not covered here. See the SDK source or open an issue if
+you need specifics.
+
+## Smart orders
+
+If your `OrderIntent` has `callData != "0x"` **and** `callDataTarget !=
+0x0`, the server treats it as a "smart order" (intent with a
+post-execution callback). Payload then omits the permit:
+
+```json
+{ "order": { /* intent with callData, callDataTarget */ } }
+```
+
+No `signedPermit`. The SDK's `TurbineClient.createAddOrderData` makes
+this distinction automatically. We have not exercised this path.
+
+## HTTP error shapes
+
+Errors come in two observed forms.
+
+**HTTP 4xx with JSON body:**
+
+```json
+{
+  "code": "INPUT_VALIDATION_ERROR",
+  "message": "Sell amount 9100000000000000 is worth ~$19.971538 which is less than $30"
+}
+```
+
+**HTTP 4xx with plain-text body (serde deserialization errors):**
+
+```
+Failed to deserialize the JSON body into the target type:
+signedPermit.signature.yParity: invalid type: string "0x0",
+expected a boolean at line 1 column 698
+```
+
+Your client should surface both forms. The official SDK wraps them in
+`TurbineError` objects.
+
+## Rate limits
+
+Not observed in our testing. If you hit one, please open an issue with
+the response headers so we can document it here.
+
+==============================================================
+# docs/orders.md
+==============================================================
+
+# Orders — `OrderIntent` fields and semantics
+
+Turbine orders are **signed off-chain intents**, not individual
+transactions. You construct an `OrderIntent`, sign a Permit2 message
+authorising Turbine's Settler to move the `sellToken`, and POST the
+two together to `/api/add_order`. The intent itself is **not**
+EIP-712 signed — only the Permit2 permit is.
+
+## Field reference
+
+```jsonc
+{
+  "owner":          "0x1111111111111111111111111111111111111111", // must match SIWE-authed wallet
+  "sellToken":      "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // EIP-55 checksummed address
+  "buyToken":       "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // EIP-55 checksummed, != sellToken
+  "sellAmount":     "16000000000000000",  // string, atomic units, > 0
+  "minBuyAmount":   "33000000",           // string, atomic units, > 0 — hard floor on execution
+  "midPriceDelta":  -10,                  // int16 bps, -10000..+10000
+  "startTime":      "1776048000",         // string, unix seconds
+  "endTime":        "1776051600",         // string, unix seconds, > startTime, in the future
+  "partialFill":    true,                 // bool, frontend always sets true
+  "callData":       "0x",                 // hex string, 0x for non-smart orders
+  "callDataTarget": "0x0000000000000000000000000000000000000000", // address, 0x0 for non-smart
+  "salt":           "0x1111...1111"  // 32 random bytes as hex
+}
+```
+
+### `owner`
+
+Must match the wallet that authenticated via SIWE. The server
+verifies this; the SDK also checks it client-side before signing and
+raises `UNAUTHORIZED` locally.
+
+### `sellToken` / `buyToken`
+
+Must be different. Use EIP-55 checksummed addresses
+(`Web3.to_checksum_address` in Python). The SDK constants ship with
+USDC, USDT, DAI, UNI, WETH, WEETH, PEPE, WBTC on mainnet; the frontend
+currently exposes only USDC/WETH.
+
+### `sellAmount`
+
+Atomic units (not decimal tokens) as a **string**. Must be > 0. This
+is how much of `sellToken` the solver is authorised to consume. Partial
+fills draw down from this pool up to `sellAmount`.
+
+### `minBuyAmount`
+
+Atomic units of the `buyToken` as a **string**. Must be > 0. This is
+a **hard floor** — the solver will refuse to fill the order at any
+price that would yield less than `minBuyAmount` total.
+
+For a passive MM order, set this close to the mid-price-equivalent
+amount minus a small safety buffer. Example: selling 0.016 WETH at a
+mid of $2192.63 expects ~35.08 USDC. Setting `minBuyAmount = 33
+USDC` gives a ~5.9% safety floor below mid and ensures you do not
+get picked off during a price crash between build and settlement.
+
+### `midPriceDelta`
+
+Signed integer in **basis points**. Range `-10000..+10000` (±100%).
+
+* **Negative = "I demand better than mid price"** — market maker /
+  earn side. Example `-15` means "fill me at no worse than 15 bps
+  better than the current mid". This is where your spread lives.
+* **Positive = "I tolerate worse than mid price"** — taker / fast
+  side. Example `+50` means "fill me even if the price is 50 bps
+  worse than mid". This is where urgency buys execution certainty.
+* **Zero** = fill at exactly the mid price.
+
+This value is sent as a **JSON integer**, not a string. The SDK uses
+`Decimal` percentages in its frontend abstraction (e.g. user enters
+`0.0028` for 28 bps and the SDK multiplies by 10,000 and rounds).
+
+### `startTime` / `endTime`
+
+Unix seconds as **strings**. `startTime` may be the current time or
+in the past; `endTime` must be in the future at submit time and
+strictly greater than `startTime`. The typical value for `endTime` is
+`now + 3600` (1 hour). Orders past `endTime` auto-expire.
+
+### `partialFill`
+
+Bool. The frontend always sets `true`. Setting `false` would mean
+"all-or-nothing fill" — unclear whether the solver supports this path
+in production, but the field exists in the SDK typing.
+
+### `callData` / `callDataTarget`
+
+For **smart orders** (intents with a post-execution contract
+callback), `callData` is non-empty hex and `callDataTarget` is the
+address to call back. For normal trades, both are zeroed:
+`callData = "0x"`, `callDataTarget = 0x0`.
+
+### `salt`
+
+32 random bytes as a `0x`-prefixed hex string. The SDK generates this
+with `crypto.getRandomValues(new Uint8Array(32))`. Salt ensures
+uniqueness of the intent hash across identical-parameters orders.
+
+## Server-side constraints
+
+Verified on mainnet via production probes on 2026-04-13.
+
+* **Minimum order value: $30 USD**. Both sides. Smaller orders return
+  HTTP 400 with `INPUT_VALIDATION_ERROR` and message
+  `"Sell amount X is worth ~$Y which is less than $30"`.
+* **Max pending orders: 5** (front-end hard-coded; server enforcement
+  not confirmed). If you run a bot, respect the 5 cap.
+* **`endTime` must be strictly in the future at submit.** A past
+  `endTime` is a local SDK validation failure, not a server one.
+
+## Lifecycle and state tracking
+
+A successful `/api/add_order` returns:
+
+```json
+{ "orderHash": "0x1111111111111111111111111111111111111111111111111111111111111111" }
+```
+
+That 32-byte hash is the authoritative ID. Track it through
+`/api/order_states`:
+
+```json
+{
+  "hash": "0xe5e7...",
+  "status": "Active",
+  "execution": [
+    {
+      "tx_hash":           "0x...",
+      "block_number":      18123456,
+      "sold_amount":       "0x0",
+      "bought_amount":     "0x0",
+      "surplus_buy_amount":"0x0"
+    }
+  ]
+}
+```
+
+Notes:
+
+* `status` is **TitleCase**. `"Active"` is the resting state we've
+  observed. Other plausible values (`Filled`, `PartiallyFilled`,
+  `Cancelled`, `Expired`) are inferred from the SDK's TypeScript
+  typing but not yet observed directly.
+* Execution bigint fields are hex-prefixed. Parse with base-0 int.
+* `surplus_buy_amount` captures positive slippage vs. `minBuyAmount`
+  (solver found a better price). For realized-yield analysis, add
+  this to `bought_amount`.
+* The front-end polls `/api/order_states` every 6 seconds with a
+  client-side mutex that prevents overlapping polls. Mimic that
+  pattern.
+
+## Cancellation
+
+```
+POST /api/cancel_order
+{ "orderHash": "0x..." }
+```
+
+Succeeds with the same hash echoed back. In our testing, cancellation
+took effect immediately server-side. If the solver is already in the
+middle of a fill, we have not observed what happens — open an issue
+if you do.
+
+==============================================================
+# docs/permit2.md
+==============================================================
+
+# Permit2 and order signing
+
+Turbine uses [Uniswap Permit2](https://github.com/Uniswap/permit2)
+for token transfer authorization. You approve Permit2 once at the
+ERC-20 level; after that, every Turbine order carries an off-chain
+signed `PermitSingle` message telling Permit2 that the Turbine
+Settler is authorized to transfer a specific amount within a specific
+deadline.
+
+**The `OrderIntent` is not EIP-712 signed.** The only typed-data
+signature in the Turbine flow is the Permit2 `PermitSingle`.
+
+## One-time setup: ERC-20 approval
+
+Before you can trade a token through Turbine, you need a standard
+ERC-20 allowance from your wallet to the Permit2 contract:
+
+```solidity
+IERC20(token).approve(PERMIT2, type(uint256).max)
+```
+
+Permit2 contract: `0x000000000022D473030F116dDEE9F6B43aC78BA3`.
+
+Do this once per token, through Rabby / MetaMask / whatever you use.
+Max-uint256 is standard. You can revoke any time by calling
+`approve(PERMIT2, 0)`.
+
+### Verifying the approval
+
+```python
+from web3 import Web3
+w3 = Web3(Web3.HTTPProvider("https://rpc.mevblocker.io"))
+weth = w3.eth.contract(
+    address="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    abi=[{
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "spender", "type": "address"},
+        ],
+        "name": "allowance",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    }],
+)
+allowance = weth.functions.allowance(
+    YOUR_WALLET,
+    "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+).call()
+assert allowance > 0
+```
+
+This is the allowance your client should check at startup and in
+periodic reconciliation. **Do not** read Permit2's own
+`allowance(owner, token, spender)` as a proxy for approval — that
+view returns `(0, 0, 0)` until the first signed Permit2 message is
+consumed, which is misleading as a "not approved" signal.
+
+## Per-order: sign `PermitSingle`
+
+For every `OrderIntent`, before POSTing to `/api/add_order`:
+
+1. Read the current Permit2 nonce for
+   `(owner, sellToken, Turbine Settler)`.
+2. Build a `PermitSingle` struct with that nonce, the sell token, the
+   amount, and an expiration.
+3. EIP-712 sign the `PermitSingle` using
+   `eth_signTypedData_v4`.
+4. Convert the 65-byte signature into
+   `{r, s, yParity, v}` format **with `yParity` as a boolean**.
+5. Include it inside the order payload alongside the permit struct.
+
+### Step 1: read the Permit2 nonce
+
+```python
+permit2 = w3.eth.contract(
+    address="0x000000000022D473030F116dDEE9F6B43aC78BA3",
+    abi=[{
+        "inputs": [
+            {"name": "owner",  "type": "address"},
+            {"name": "token",  "type": "address"},
+            {"name": "spender","type": "address"},
+        ],
+        "name": "allowance",
+        "outputs": [
+            {"name": "amount",     "type": "uint160"},
+            {"name": "expiration", "type": "uint48"},
+            {"name": "nonce",      "type": "uint48"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    }],
+)
+_, _, nonce = permit2.functions.allowance(
+    wallet_address,
+    sell_token,
+    settler_address,   # 0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac
+).call()
+```
+
+The nonce starts at 0 and increments each time a signed permit is
+consumed on-chain.
+
+### Step 2: build and sign the typed data
+
+```python
+from eth_account import Account
+
+MAX_UINT160 = (1 << 160) - 1
+
+typed_data = {
+    "domain": {
+        "name": "Permit2",
+        "chainId": 1,
+        "verifyingContract": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+    },
+    "primaryType": "PermitSingle",
+    "types": {
+        "EIP712Domain": [
+            {"name": "name",              "type": "string"},
+            {"name": "chainId",           "type": "uint256"},
+            {"name": "verifyingContract", "type": "address"},
+        ],
+        "PermitSingle": [
+            {"name": "details",     "type": "PermitDetails"},
+            {"name": "spender",     "type": "address"},
+            {"name": "sigDeadline", "type": "uint256"},
+        ],
+        "PermitDetails": [
+            {"name": "token",      "type": "address"},
+            {"name": "amount",     "type": "uint160"},
+            {"name": "expiration", "type": "uint48"},
+            {"name": "nonce",      "type": "uint48"},
+        ],
+    },
+    "message": {
+        "details": {
+            "token":      sell_token,       # checksummed
+            "amount":     MAX_UINT160,      # or a tighter per-order cap
+            "expiration": order_end_time,   # Unix seconds
+            "nonce":      nonce,            # from step 1
+        },
+        "spender":     settler_address,
+        "sigDeadline": order_end_time,
+    },
+}
+
+signed = account.sign_typed_data(full_message=typed_data)
+sig_bytes = signed.signature  # 65 bytes
+```
+
+### Step 3: convert the signature to structured form
+
+Turbine's backend expects a structured signature object, not the raw
+65-byte blob:
+
+```python
+r = "0x" + sig_bytes[0:32].hex()
+s = "0x" + sig_bytes[32:64].hex()
+v = sig_bytes[64]
+if v in (0, 1):          # normalize EIP-2098
+    v += 27
+assert v in (27, 28)
+
+structured = {
+    "r":       r,
+    "s":       s,
+    "yParity": (v == 28),      # JSON boolean! (see wire-format.md)
+    "v":       hex(v),          # "0x1b" or "0x1c"
+}
+```
+
+**Critical:** `yParity` on the `/add_order` endpoint is a JSON
+**boolean**. Sending `"0x0"` / `"0x1"` fails with HTTP 422. The
+`/api/verify` endpoint wants the opposite convention (string). See
+[wire-format.md](wire-format.md).
+
+### Step 4: attach to the order payload
+
+```python
+add_order_body = {
+    "order":         intent.to_json(),
+    "signedPermit": {
+        "signature": structured,
+        "permit": {
+            "details": {
+                "token":      sell_token,
+                "amount":     str(MAX_UINT160),
+                "expiration": order_end_time,
+                "nonce":      nonce,
+            },
+            "spender":     settler_address,
+            "sigDeadline": str(order_end_time),
+        },
+    },
+}
+```
+
+POST this to `/api/add_order`. If everything lines up, the response
+is `{"orderHash": "0x..."}` and you can poll that hash.
+
+## Nonce semantics
+
+Permit2's `allowance(owner, token, spender)` returns
+`(amount, expiration, nonce)`. The nonce **only increments when the
+Settler actually consumes a signed permit** (i.e. when a fill
+settles on-chain). Resting orders do not advance the nonce. For a
+passive market maker this means:
+
+* Sign every order with the *current* nonce.
+* If an order never fills (auto-expires), its signed permit is simply
+  never used — the nonce stays where it was.
+* If multiple orders are signed with the same nonce and one fills,
+  the others become invalid — but that scenario is unusual for a
+  single-order-per-slot strategy.
+
+The official SDK does not enforce nonce uniqueness across concurrent
+orders; it reads the current Permit2 nonce fresh for every sign call.
+
+## Signing the same permit amount for many orders
+
+Permit2 allows the `amount` field in `PermitSingle` to be reused up
+to the full approved allowance. Using `amount = maxUint160` (the
+"infinite" convention) and a short `sigDeadline` per order is the
+common pattern. Per-order caps also work if you want finer control.
+
+## Emergency revoke
+
+If anything goes wrong — you want to kill a running bot, you suspect
+a compromised settler address, you are leaving the platform — revoke
+Permit2's ERC-20 allowance:
+
+```solidity
+IERC20(token).approve(PERMIT2, 0)
+```
+
+That invalidates all future `transferFrom` calls through Permit2
+regardless of any signed-but-unsettled `PermitSingle` messages. Do
+this per token. Cost is ~1 gas-unit approval per token.
+
+==============================================================
+# docs/wire-format.md
+==============================================================
+
+# Wire format — the non-obvious bits
+
+If you are building a client from scratch, these are the details
+that cost real time to discover and that aren't visible from a
+cursory SDK read. Every item below was validated against the live
+production API on 2026-04-13.
+
+## Bigint serialization: hex on the way down
+
+Every bigint field in Turbine **responses** is serialized as a hex
+string with an `0x` prefix, via the SDK's `bigIntReplacer`:
+
+```javascript
+function bigIntReplacer(_key, value) {
+    if (typeof value === "bigint") {
+        return `0x${value.toString(16)}`;
+    }
+    return value;
+}
+```
+
+Affected fields we've verified:
+
+* `/api/order_fees` → returns strings like `"0x0"`, `"0x1ef"`,
+  `"0x294f9e980"`
+* `/api/order_states` execution entries → `sold_amount`,
+  `bought_amount`, `surplus_buy_amount`
+
+The server quite genuinely returns `"0x0"` for a zero-fee order.
+Python `int("0x0")` without a base raises `ValueError` because
+`int()` defaults to base 10. Parse with **base 0**:
+
+```python
+def parse_bigint(value):
+    if isinstance(value, bool):
+        raise ValueError("bool is not a bigint")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value, 0)   # auto-detect 0x / 0o / decimal
+    raise ValueError(f"unexpected bigint type: {type(value).__name__}")
+```
+
+**Inputs** (`OrderIntent.sellAmount`, `OrderIntent.minBuyAmount`,
+`PermitSingle.amount`, `PermitSingle.sigDeadline`) can be either
+decimal strings (`"1000000000000000"`) or hex strings (`"0xde0b6b3a7640000"`).
+The SDK validation in `validation.ts` uses JavaScript's `BigInt(value)`
+which accepts both forms. We verified decimal inputs are accepted by
+production. If you want to match the SDK exactly, use hex on the way up
+as well.
+
+## `yParity`: boolean on `/add_order`, string on `/verify`
+
+The structured signature object has this shape:
+
+```jsonc
+{
+  "r":       "0x...",   // 32-byte hex
+  "s":       "0x...",   // 32-byte hex
+  "yParity": ???,       // depends on endpoint
+  "v":       "0x1b"     // 0x1b (27) or 0x1c (28)
+}
+```
+
+`yParity` is serialized differently on two endpoints:
+
+| Endpoint | `yParity` type | Example |
+|---|---|---|
+| `POST /api/verify` (SIWE) | **hex string** | `"0x0"` or `"0x1"` |
+| `POST /api/add_order` → `signedPermit.signature` | **JSON boolean** | `true` or `false` |
+
+Sending a string to `/add_order` produces:
+
+```
+HTTP 422
+Failed to deserialize the JSON body into the target type:
+signedPermit.signature.yParity: invalid type: string "0x0", expected a boolean at line 1 column 698
+```
+
+Sending a bool to `/verify` produces the mirror error. The two
+endpoints are deserialized by different Rust structs on the backend;
+the two conventions happen to coexist historically.
+
+**Recommendation:** store `yParity` internally as a Python `bool`
+(canonical form). Serialize differently per call site:
+
+```python
+def to_permit2_json(self):
+    return {"r": self.r, "s": self.s, "yParity": self.y_parity, "v": self.v}
+
+def to_siwe_json(self):
+    return {
+        "r": self.r, "s": self.s,
+        "yParity": "0x1" if self.y_parity else "0x0",
+        "v": self.v,
+    }
+```
+
+Do **not** keep the string form as canonical — when you want to
+compare or compute, bool is what's actually useful.
+
+The mapping from ECDSA `v` to `yParity`:
+
+| `v` (decimal) | `yParity` (bool) | `yParity` (string) |
+|---|---|---|
+| 27 | `false` | `"0x0"` |
+| 28 | `true` | `"0x1"` |
+
+## `status` field casing
+
+`/api/order_states` returns the order `status` as **TitleCase**:
+
+```
+"status": "Active"
+```
+
+If you wrote your state machine guessing `"active"` or `"open"` or
+`"RESTING"`, it will silently not transition. Normalize with
+`.lower()` on read, or match case-exact.
+
+Other enum values we expect based on the SDK TypeScript typing but
+have **not observed** yet:
+
+* `"Filled"` — fully executed
+* `"PartiallyFilled"` — some execution history, still active
+* `"Cancelled"` — user or server cancelled
+* `"Expired"` — past `endTime`
+
+If you observe any of these in the wild, please PR to update this
+file.
+
+## `midPriceDelta` type: integer, not string
+
+Unlike most bigint fields in `OrderIntent`, `midPriceDelta` is a
+**JSON integer**, not a string. It fits in an `int16` (`-10000..+10000`)
+and the SDK treats it as a number.
+
+```jsonc
+{
+  "midPriceDelta": -15,   // integer, not "-15"
+  ...
+}
+```
+
+## `sellAmount` / `minBuyAmount` type: string
+
+Both are atomic-units bigints wrapped in JSON strings:
+
+```jsonc
+{
+  "sellAmount":   "16000000000000000",
+  "minBuyAmount": "33000000",
+  ...
+}
+```
+
+Decimal strings are accepted by the server. The SDK generates them
+via `value.toString()` (Python equivalent: `str(int_value)`).
+
+## `startTime` / `endTime` type: string
+
+These are Unix seconds as **strings**, not integers:
+
+```jsonc
+{
+  "startTime": "1776048000",
+  "endTime":   "1776051600",
+  ...
+}
+```
+
+The validation accepts both string and number forms if you decode
+them as BigInts, but the SDK emits strings, and the frontend does
+too. Stick with strings for compatibility.
+
+## `partialFill` type: bool
+
+Plain JSON boolean. Front-end always emits `true`:
+
+```jsonc
+{
+  "partialFill": true,
+  ...
+}
+```
+
+## `callData` and `callDataTarget`
+
+For non-smart orders: `callData = "0x"` (literal two-character hex
+string) and `callDataTarget = "0x0000000000000000000000000000000000000000"`
+(the zero address). Both are **strings**; the zero address must be
+full 20-byte hex, not `"0x"`.
+
+## `salt`
+
+A 32-byte random value, `0x`-prefixed hex string (66 chars total).
+Not a bigint — it is a bytes32 value. Keep it as a string:
+
+```python
+import secrets
+salt = "0x" + secrets.token_bytes(32).hex()
+```
+
+## Response bodies on errors
+
+Two distinct shapes in the wild:
+
+**Business validation errors (HTTP 400):**
+
+```json
+{
+  "code": "INPUT_VALIDATION_ERROR",
+  "message": "Sell amount 9100000000000000 is worth ~$19.971538 which is less than $30"
+}
+```
+
+**Serde deserialization errors (HTTP 422):**
+
+```
+Failed to deserialize the JSON body into the target type:
+signedPermit.signature.yParity: invalid type: string "0x0", expected a boolean at line 1 column 698
+```
+
+Note the second form is **plain text**, not JSON. A robust client
+should:
+
+```python
+try:
+    body = response.json()
+except ValueError:
+    body = response.text
+```
+
+and surface both.
+
+## Cookies and session
+
+`/api/verify` sets an HTTP cookie that carries the session. Every
+authenticated endpoint must be called with `credentials: "include"`
+(browser) or a persistent `requests.Session()` (Python). Missing the
+cookie returns an auth failure.
+
+The exact cookie name is implementation-detail; we don't need to
+parse it, just pass it through.
+
+## Address format
+
+All addresses in requests are **EIP-55 checksummed** hex strings.
+`Web3.to_checksum_address` in Python. Lowercased or uppercased
+addresses may be accepted by lenient validators but the SDK emits
+checksummed.
+
+In responses (e.g. the `/api/me` `address` field), the server
+sometimes returns lowercase. Compare case-insensitively on your side.
+
+## Empty-body responses
+
+`POST /api/verify` and `POST /api/logout` return HTTP 200 with an
+empty body on success. Do not try to parse JSON — check status code
+only.
+
+==============================================================
+# docs/fees.md
+==============================================================
+
+# Platform fees
+
+Turbine charges a **platform fee** on every filled order. If you are
+building any kind of active strategy — especially a market maker
+that earns on narrow spreads — you **must** account for this fee
+when sizing positions and computing expected yield. It is not
+documented anywhere on docs.propellerheads.xyz at the time of
+writing; the only signal in the app UI is a tooltip that says
+`"Includes a platform fee of 0.01%"` rounded to two decimals.
+
+**The actual fee: ~0.99 bps (0.0099%) of the mid-price notional, flat
+regardless of size, side, or `midPriceDelta`.**
+
+This page documents how we measured that and how it interacts with
+spread.
+
+## Measuring the fee
+
+`POST /api/order_fees` is a quote-only endpoint: you send a full
+`OrderIntent` (without `signedPermit`) and the server returns the
+platform fee it would charge, denominated in **buy-token atomic
+units**, as a hex-prefixed bigint string.
+
+We ran this against production on 2026-04-13 with a sweep over:
+
+* 7 sizes: $5, $20, $35, $100, $200, $500, $1000
+* 4 deltas: `-5`, `-10`, `-20`, `-30` bps
+* Both sides (sell WETH→USDC, buy USDC→WETH)
+
+ETH mid-price at the time: $2193.45.
+
+### Selected sell-side results (WETH → USDC, buy token USDC)
+
+| Size | `sellAmount` (WETH atomic) | `minBuyAmount` (USDC atomic) | `delta_bps` | Fee (USDC atomic) | Fee / size_usd |
+|---|---|---|---|---|---|
+| $5    | 2,279,000,000,000,000 | 4,500,000   | −10 | 495     | 0.0099% |
+| $20   | 9,118,000,000,000,000 | 18,000,000  | −10 | 1,980   | 0.0099% |
+| $35   | 15,957,000,000,000,000 | 31,500,000 | −10 | 3,465   | 0.0099% |
+| $100  | 45,590,000,000,000,000 | 90,000,000 | −10 | 9,900   | 0.0099% |
+| $200  | 91,180,000,000,000,000 | 180,000,000 | −10 | 19,800  | 0.0099% |
+| $500  | 227,950,000,000,000,000 | 450,000,000 | −10 | 49,500  | 0.0099% |
+| $1000 | 455,900,000,000,000,000 | 900,000,000 | −10 | 99,000  | 0.0099% |
+
+### Selected buy-side results (USDC → WETH, buy token WETH)
+
+| Size | `sellAmount` (USDC atomic) | `minBuyAmount` (WETH atomic) | Fee (WETH atomic) | Fee / size_usd |
+|---|---|---|---|---|
+| $5    | 5,000,000     | 2,051,000,000,000,000   | 225,671,886,753     | 0.0099% |
+| $35   | 35,000,000    | 14,357,000,000,000,000  | 1,579,703,207,275   | 0.0099% |
+| $200  | 200,000,000   | 82,040,000,000,000,000  | 9,026,875,470,148   | 0.0099% |
+| $1000 | 1,000,000,000 | 410,200,000,000,000,000 | 45,134,377,350,748  | 0.0099% |
+
+### Observations
+
+1. **Fee is linear in swap size.** Sell $5 → 495 atomic USDC,
+   sell $1000 → 99,000 atomic USDC. Slope = 99 atomic per $1.
+2. **Fee is independent of `midPriceDelta`.** All four tested delta
+   values (−5, −10, −20, −30) return the exact same fee for a given
+   size. The `midPriceDelta` is a pure filter on execution price, not
+   an input to fee calculation.
+3. **Fee is symmetric across sides.** Selling USDC vs selling WETH
+   yields the same 0.0099% ratio.
+4. **Flat 0.99 bps of the mid-price expected value.** Every row is
+   within 0.001 bps of the same number.
+
+## Interpretation
+
+The frontend code in `TurbineOptions.tsx` computes:
+
+```javascript
+const feePercent = new Decimal(fee.toString())
+    .div(intent.minBuyAmount)
+    .times(100);
+```
+
+and then **subtracts** `feePercent` from the user's
+`midPriceDelta.deltaPercent` to produce the displayed "Your spread"
+number:
+
+```javascript
+const spreadPercent = feePercent !== undefined
+    ? turbineOptions.delta.deltaPercent.minus(feeRatio)
+    : turbineOptions.delta.deltaPercent;
+```
+
+i.e., the platform fee is **deducted from the order creator's
+realized price improvement**. For a market maker setting
+`midPriceDelta = -10 bps`, the actual realized spread is
+`10 - ~1 = ~9 bps`. For a taker with `midPriceDelta = +50 bps`, the
+fee is the same structure — it widens your effective cost from 50
+bps to ~51 bps.
+
+## Impact table for market making
+
+If your strategy sets `midPriceDelta = -X bps` (passive MM / earn
+side), your **net realized edge per fill** is approximately:
+
+| Set spread `X` | Platform fee | Net realized edge | Fee as % of spread |
+|---|---|---|---|
+|  5 bps | 1 bp | **~4 bps** | 20% cut |
+| 10 bps | 1 bp | **~9 bps** | 10% cut |
+| 15 bps | 1 bp | ~14 bps | 6.7% cut |
+| 20 bps | 1 bp | ~19 bps | 5.0% cut |
+| 30 bps | 1 bp | ~29 bps | 3.3% cut |
+| 50 bps | 1 bp | ~49 bps | 2.0% cut |
+
+Small-spread strategies are disproportionately hurt by the fee.
+Below ~5 bps the fee eats so much of the edge that unless fill rate
+is extremely high, the bucket is unprofitable in expectation.
+
+## Computing the fee locally
+
+Because the fee is a simple linear function of size, you don't have
+to call `/api/order_fees` for every prospective order. An offline
+estimate is accurate to within rounding noise:
+
+```python
+def estimate_fee_atomic(sell_amount_atomic, sell_token_decimals,
+                       mid_price_usd_per_eth, buy_token_decimals):
+    """Returns the estimated platform fee in buy-token atomic units."""
+    FEE_BPS = 0.99          # 0.0099%
+    # Convert the sell amount to USD at the mid
+    sell_usd = sell_amount_atomic / (10 ** sell_token_decimals)
+    if sell_token_decimals != 6:          # assume non-USDC is ETH-priced
+        sell_usd *= mid_price_usd_per_eth
+    # Fee in USD
+    fee_usd = sell_usd * FEE_BPS / 10_000
+    # Fee in buy-token atomic units
+    if buy_token_decimals == 6:           # USDC
+        return int(fee_usd * 10 ** 6)
+    else:                                 # WETH
+        return int((fee_usd / mid_price_usd_per_eth) * 10 ** 18)
+```
+
+Use this for UI display and pre-trade feasibility checks; use
+`/api/order_fees` for the authoritative value before actually
+submitting.
+
+## Post-run yield analysis
+
+When analysing realized yield from a `fills.csv`, **subtract 1 bp**
+(or the exact fee for the quoted intent) from whatever raw
+spread the execution appears to show. Otherwise your "mean realized
+yield" will be over-reported.
+
+A simple correction:
+
+```python
+# In your bucket-level analysis:
+net_yield_bps = raw_realized_yield_bps - 0.99
+```
+
+If you want to be exact, include the fee in your fill-level records
+at submit time (grab it from `/api/order_fees` during the build
+phase) and compute `realized - fee` at analysis time.
+
+## Caveats
+
+* The 0.99 bps figure was measured **2026-04-13 during Turbine Alpha
+  private beta**. PropellerHeads can change this at any time. Re-run
+  the probe against `/api/order_fees` before making production
+  decisions.
+* We have not verified whether the fee differs for LP (`add_liquidity`)
+  or for smart orders (non-empty `callData`). The measurement above
+  covers plain-intent orders only.
+* The fee is deducted from the order creator's side. For an MM
+  sending passive orders and a retail user sending taker orders that
+  match against them, both sides may pay — we have not conducted a
+  matched-fill experiment to verify. If you run one, please PR the
+  results.
+
+==============================================================
+# docs/integration-guide.md
+==============================================================
+
+# Integration guide
+
+Pragmatic notes on building a client — the things we'd have saved
+time on if we had read this first.
+
+## Setup checklist
+
+Before your client makes a single API call:
+
+1. **Confirm ERC-20 approval** of every token you plan to trade,
+   granting the Permit2 contract allowance. See
+   [permit2.md](permit2.md). If approval is missing, `/api/add_order`
+   submissions succeed but settlement will revert.
+2. **Hold gas reserve** for one-time `approve` calls. You do **not**
+   need gas for ongoing trading — settlement gas is paid by Turbine's
+   executor EOA.
+3. **Have a reliable Ethereum RPC.** MEV Blocker
+   (`https://rpc.mevblocker.io`) is free, has no aggressive rate
+   limits on read methods, and keeps your balance/nonce queries
+   private from front-runners. Avoid llamarpc / blastapi for
+   high-frequency reads — we hit 429s during canary testing.
+4. **Pin contract addresses.** Fetch `/api/config` at startup and
+   compare every field against hard-coded pins in your config. Halt
+   on mismatch.
+5. **Pin SIWE fields.** `siweDomain` and `siweUri` are what you
+   sign — if they changed on the server, your signatures would
+   become cross-origin valid, which is bad. Pin them.
+
+## Startup sequence
+
+```
+acquire flock (prevent dual instance)
+       │
+       ▼
+load wallet (decrypt keystore)
+       │
+       ▼
+open/replay durable journal
+       │
+       ▼
+GET /api/status                 ← sanity ping
+       │
+       ▼
+GET /api/config                 ← with pin verification (fail fast)
+       │
+       ▼
+fetch live price from Binance   ← for equity baseline
+       │
+       ▼
+read ERC-20 balances on-chain   ← USDC + WETH of wallet
+read ERC-20 allowances on-chain ← to Permit2
+read Permit2 executor balance   ← soft warning if < 0.01 ETH
+       │
+       ▼
+compute initial_equity_usd      ← baseline for drawdown stop
+       │
+       ▼
+enter main loop
+```
+
+## Main loop cadence
+
+```
+every tick (e.g. 15-30 s):
+    refresh oracle (Binance mid)
+    risk checks       ← drawdown, api failures, oracle staleness
+    poll open orders  ← POST /api/order_states with all live hashes
+    place missing slots according to strategy
+
+every ~5 min:
+    reconcile on-chain state (balances + ERC-20 allowances)
+    executor balance probe
+
+every 6 s (separate cadence if you want faster fill detection):
+    poll /api/order_states again
+```
+
+Follow the front-end's pattern of **serializing concurrent polls**
+with a mutex. Two overlapping `/api/order_states` calls on the same
+hashes produce identical responses and waste quota.
+
+## SIWE auth serialization
+
+The nonce/verify pair is single-use. If your client runs multiple
+threads and each re-authenticates independently when they see a
+logged-out session, you will race and one of them will fail. Put a
+mutex around the entire SIWE flow:
+
+```python
+def ensure_authenticated(self):
+    with self._auth_lock:
+        if self.is_authenticated():
+            return
+        self.authenticate()        # /nonce + /verify
+        # Re-check so we can return the right address if something
+        # flipped us out of the session immediately
+        if not self.is_authenticated():
+            raise AuthFailed()
+```
+
+## Order placement pattern
+
+One fill-cycle for an intent looks like:
+
+1. Build the `OrderIntent` (see [orders.md](orders.md)).
+2. Read the current Permit2 nonce on-chain for
+   `(wallet, sellToken, settler)`.
+3. Build and sign the `PermitSingle` EIP-712 typed data.
+4. Convert signature to `{r, s, yParity: bool, v}`.
+5. POST `/api/add_order` with `{order, signedPermit}`.
+6. On `{orderHash: "0x..."}`, start polling that hash via
+   `/api/order_states`.
+7. On `status = "Filled"` (TitleCase!), consider the order complete.
+   On `"Cancelled"` or `"Expired"`, drop it and free the slot.
+8. If you need to cancel early, POST `/api/cancel_order` with the
+   hash.
+
+The JS SDK template in `turbineClient.ts` follows this exactly, plus
+handles smart-order callbacks and batch submissions. Our Python
+reference in [examples/minimal_client.py](../examples/minimal_client.py)
+implements the non-smart path.
+
+## State tracking
+
+Keep a local ledger that associates every submitted order with:
+
+* `local_id` (a UUID you generate pre-submit, so you can recover from
+  half-completed submits)
+* `order_hash` (assigned by the server)
+* `side` (buy/sell)
+* `spread_bps` (what you asked for)
+* `eth_price_usd` (mid at submit time)
+* `expected_buy_atomic` (what you'd get at mid)
+* `fee_atomic` (from `/api/order_fees`, for realized-yield
+  computation)
+* current `status` from polling
+* `executed_sell_amount` / `executed_buy_amount` from the latest poll
+
+Use that to compute realized PnL, fill rates per spread bucket, and
+time-to-fill distributions. The fee field in particular is essential
+for any honest yield attribution — see [fees.md](fees.md).
+
+## Error handling
+
+Every request can fail in one of:
+
+* **HTTP 2xx** — success
+* **HTTP 4xx with JSON body** — business error
+  ```json
+  {"code": "INPUT_VALIDATION_ERROR", "message": "..."}
+  ```
+* **HTTP 4xx with plain text body** — serde deserialization error
+  ```
+  Failed to deserialize the JSON body into the target type: ...
+  ```
+* **HTTP 5xx** — transient; retry with backoff
+* **Network error** — same as 5xx
+
+Wrap both JSON and plain-text responses so your error surface has
+the raw body attached to the exception — it saves hours of guessing
+when something goes wrong.
+
+## Concurrency safety
+
+If your architecture uses multiple threads:
+
+1. **Serialize SIWE auth** — one mutex around the `/nonce → /verify`
+   pair per client instance.
+2. **Serialize order book mutations** — if multiple threads can
+   submit, cancel, or update state, put a single mutex around the
+   state manager.
+3. **Don't share `requests.Session()` without care** — in practice
+   it is thread-safe for concurrent requests, but you shouldn't rely
+   on that for stateful flows. Hold the auth lock while touching
+   cookies.
+
+## Idempotency
+
+Nothing on the Turbine API is idempotent by default. `/api/add_order`
+sent twice will create two orders (with different hashes if you use
+different salts, same hash if you replay the same intent).
+
+Generate a random salt per submission and use a persistent journal
+on your side so replays after a crash don't double-submit.
+
+## Rate limits
+
+We have not hit rate limits in any Alpha testing. If you run a
+large production bot, start conservative (6-second poll interval per
+the SDK) and ramp up only if needed.
+
+## Minimum order size
+
+**$30 USD**. Enforced server-side. Pricing in USD means you need to
+convert your atomic amounts through a live mid-price at submit time
+and leave buffer for price drift between build and submit. A safe
+floor is ~$35 for a "small" order.
+
+## Monitoring the executor
+
+The Turbine executor EOA (`0x89c7…8890` at time of writing) is the
+one who actually pays gas. If its balance approaches zero, your
+orders may queue up without settling.
+
+Passive approach: poll `eth_getBalance(executor)` every 5 minutes,
+emit a warning below 0.01 ETH, **do not halt** (you do not control
+it — halting your bot does nothing for the problem). Emit a louder
+alert to your operator channel and wait for PropellerHeads to
+top up.
+
+## Cancel-on-shutdown pattern
+
+On SIGTERM / clean shutdown, do:
+
+```python
+def shut_down(self):
+    # Best-effort cancel of every live order
+    for order_hash in self.live_order_hashes():
+        try:
+            self.client.cancel_order(order_hash)
+        except TurbineClientError as exc:
+            log.error("cancel_order failed: %s", exc)
+
+    # ALWAYS re-check after cancel_all — some cancels may have failed
+    still_live = self.still_live_order_hashes()
+    if still_live:
+        log.critical("SHUTDOWN WITH LIVE ORDERS: %s", still_live)
+```
+
+A bot that exits "cleanly" while leaving orders live on the venue
+is a silent exposure bug. Log a CRITICAL so you notice.
+
+==============================================================
+# CONTRIBUTING.md
+==============================================================
+
+# Contributing
+
+Everything in this repository was verified against the live
+production Turbine API on **2026-04-13**. Turbine is in Alpha and
+things change without notice, so if you observe a drift we'd love a
+PR.
+
+## What we especially want
+
+1. **New status enum values.** `/api/order_states` returns
+   `"Active"` for resting orders. We haven't directly observed
+   values for Filled, Partially Filled, Cancelled, or Expired — if
+   you see them, please PR with the exact string.
+2. **Fee changes.** The ~0.99 bps figure in [docs/fees.md](docs/fees.md)
+   was measured during Alpha. Re-run the probe and open a PR if it
+   drifts.
+3. **New endpoints.** If PropellerHeads ship official Turbine docs
+   that contradict anything here, PR a correction.
+4. **Error shapes.** We documented two observed error response
+   formats — there may be more.
+5. **Rate limits.** We have not hit any. If you do, headers +
+   behaviour welcome.
+
+## Process
+
+* Open an issue first if you are planning a big change. Small
+  corrections can go straight to a PR.
+* Keep attribution (CC-BY-4.0): add yourself to a CONTRIBUTORS list
+  in the PR description if you want credit.
+* Prefer verified facts. If you're unsure, mark the claim with
+  "**Unverified:**" so readers know.
+* Do **not** include private keys, wallet addresses tied to real
+  funds, or any secret data in PRs or examples.
+
+## Running the probe against production
+
+Minimal reproducer for the fee measurement:
+
+```python
+from examples.minimal_client import MinimalTurbineClient, OrderIntent, random_salt, WETH, USDC
+import os, time
+from eth_account import Account
+
+client = MinimalTurbineClient(Account.from_key(os.environ["WALLET_PRIVATE_KEY"]))
+client.check_status()
+client.fetch_config_and_pin()
+client.authenticate()
+now = int(time.time())
+intent = OrderIntent(
+    owner=client.account.address,
+    sell_token=WETH, buy_token=USDC,
+    sell_amount=int(0.016 * 10**18),
+    min_buy_amount=33 * 10**6,
+    mid_price_delta_bps=-10,
+    start_time=now, end_time=now + 3600,
+    salt=random_salt(),
+)
+print("fee:", client.quote_fee(intent))
+```
+
+`/api/order_fees` does not actually place an order — it is safe to
+run for as many sizes / deltas / sides as you want.

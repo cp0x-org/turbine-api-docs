@@ -1,0 +1,48 @@
+# turbine-api-docs
+
+> Community-maintained reference for the Turbine Alpha HTTP API by
+> PropellerHeads. Reverse-engineered from the public
+> `app.turbine.exchange` source map and verified against production
+> on 2026-04-13. Not affiliated with PropellerHeads.
+
+Turbine is an intent-based DEX ("dark solver") by PropellerHeads.
+Users sign off-chain `OrderIntent` messages + Permit2 typed data;
+a TEE-resident solver matches them and an operator-funded executor
+EOA settles them on-chain. No official public API documentation
+existed when this reference was written — the team lists "Turbine
+Docs" as "soon" on their site.
+
+## Quick facts
+
+- Base URL: `https://api.turbine.exchange/api`
+- Chain: Ethereum mainnet (chainId 1)
+- Auth: SIWE (EIP-4361), `personal_sign`, cookie session
+- Order signing: Permit2 `PermitSingle` EIP-712 (the `OrderIntent`
+  itself is NOT signed)
+- Minimum order value: **$30 USD**, enforced server-side
+- Platform fee: **~0.99 bps** (0.0099%) flat of mid-price notional,
+  deducted from order creator's realized spread
+- BigInts in responses: hex-prefixed strings ("0x1a")
+- `yParity` in signatures: **bool for `/add_order`**, **hex string
+  for `/verify`** (two different Rust structs server-side)
+- Status enum seen: `"Active"` (TitleCase) for resting orders
+
+## Docs
+
+- [README](README.md): quick reference + pinned contract addresses
+- [Overview](docs/overview.md): architecture, executor model, Alpha caveats
+- [Authentication](docs/authentication.md): SIWE flow details
+- [API reference](docs/api-reference.md): every endpoint with payloads
+- [Orders](docs/orders.md): `OrderIntent` fields, lifecycle, min size
+- [Permit2](docs/permit2.md): ERC-20 approval + `PermitSingle` signing
+- [Wire format](docs/wire-format.md): hex bigints, yParity dual convention
+- [Fees](docs/fees.md): platform fee measurement + impact on MM yield
+- [Integration guide](docs/integration-guide.md): pragmatic client-building notes
+
+## Examples
+
+- [minimal_client.py](examples/minimal_client.py): self-contained Python reference implementing status check, SIWE auth, Permit2 signing, `/add_order`, `/order_states`, `/cancel_order`
+
+## Full plain-text dump
+
+- [llms-full.txt](llms-full.txt): all docs concatenated into a single plain-text file, suitable for feeding to an LLM context window whole.

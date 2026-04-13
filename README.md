@@ -12,6 +12,18 @@ Community-maintained reference for the **Turbine Alpha** HTTP API by
 > information see [docs.propellerheads.xyz](https://docs.propellerheads.xyz)
 > (Turbine Docs listed as "soon" at the time of writing).
 
+## For AI agents / LLMs
+
+- **[llms.txt](llms.txt)** — this repo follows the
+  [llmstxt.org](https://llmstxt.org) convention. Machine-readable
+  index of every page with a one-sentence description. Point your
+  tool at this file to discover the rest.
+- **[llms-full.txt](llms-full.txt)** — all documentation
+  concatenated into a single plain-text file (~1900 lines), suitable
+  for loading into an LLM context window whole.
+- **[examples/minimal_client.py](examples/minimal_client.py)** — a
+  self-contained Python reference you can copy as a starting point.
+
 ## Why this exists
 
 PropellerHeads ship Turbine as a private-beta Alpha with the front-end
