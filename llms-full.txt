@@ -1154,13 +1154,12 @@ function bigIntReplacer(_key, value) {
 
 Affected fields we've verified:
 
-* `/api/order_fees` → returns strings like `"0x0"`, `"0x1ef"`,
+* `/api/order_fees` → returns strings like `"0x1ef"`,
   `"0x294f9e980"`
 * `/api/order_states` execution entries → `sold_amount`,
   `bought_amount`, `surplus_buy_amount`
 
-The server quite genuinely returns `"0x0"` for a zero-fee order.
-Python `int("0x0")` without a base raises `ValueError` because
+Python `int("0x1ef")` without a base raises `ValueError` because
 `int()` defaults to base 10. Parse with **base 0**:
 
 ```python
