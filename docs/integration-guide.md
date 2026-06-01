@@ -1,7 +1,7 @@
 # Integration guide
 
-Pragmatic notes on building a client — the things we'd have saved
-time on if we had read this first.
+Pragmatic notes on building a client — the things that save time
+if you read them first.
 
 ## Setup checklist
 
@@ -29,13 +29,13 @@ Before your client makes a single API call:
 ## Startup sequence
 
 ```
-acquire flock (prevent dual instance)
+acquire single-instance lock (prevent dual instance)
        │
        ▼
-load wallet (decrypt keystore)
+load your signing key
        │
        ▼
-open/replay durable journal
+open/replay any durable state you keep locally
        │
        ▼
 GET /api/status                 ← sanity ping
@@ -44,15 +44,9 @@ GET /api/status                 ← sanity ping
 GET /api/config                 ← with pin verification (fail fast)
        │
        ▼
-fetch live price from Binance   ← for equity baseline
-       │
-       ▼
-read ERC-20 balances on-chain   ← USDC + WETH of wallet
+read ERC-20 balances on-chain   ← e.g. USDC + WETH of your wallet
 read ERC-20 allowances on-chain ← to Permit2
-read Permit2 executor balance   ← soft warning if < 0.01 ETH
-       │
-       ▼
-compute initial_equity_usd      ← baseline for drawdown stop
+read executor balance on-chain  ← soft warning if low (see below)
        │
        ▼
 enter main loop
@@ -62,10 +56,10 @@ enter main loop
 
 ```
 every tick (e.g. 15-30 s):
-    refresh oracle (Binance mid)
-    risk checks       ← drawdown, api failures, oracle staleness
+    refresh your price reference (if your strategy needs one)
+    run your own risk checks
     poll open orders  ← POST /api/order_states with all live hashes
-    place missing slots according to strategy
+    place/replace orders according to your strategy
 
 every ~5 min:
     reconcile on-chain state (balances + ERC-20 allowances)
@@ -74,6 +68,9 @@ every ~5 min:
 every 6 s (separate cadence if you want faster fill detection):
     poll /api/order_states again
 ```
+
+Add whatever risk checks fit your own strategy. The API does
+not enforce these for you.
 
 Follow the front-end's pattern of **serializing concurrent polls**
 with a mutex. Two overlapping `/api/order_states` calls on the same
@@ -102,23 +99,33 @@ def ensure_authenticated(self):
 
 One fill-cycle for an intent looks like:
 
-1. Build the `OrderIntent` (see [orders.md](orders.md)).
+1. Build the `OrderIntent` (see [orders.md](orders.md)), including its
+   `spreadCurve` (the per-order delta curve that replaced the old
+   scalar `midPriceDelta` — flat via the SDK's `constant(deltaBps)`,
+   or a ramp via `auto({fastSpreadBps, ...})`). See [orders.md](orders.md)
+   for the curve shape.
 2. Read the current Permit2 nonce on-chain for
-   `(wallet, sellToken, settler)`.
-3. Build and sign the `PermitSingle` EIP-712 typed data.
+   `(wallet, sellToken, settler)`. The settler is the
+   `turbineSettlerAddress` from `/api/config`
+   (`0xbb3e81c0563dc61719696475f5c7b5e011a73f8a` at time of writing) —
+   read it from config rather than hard-coding it.
+3. Build and sign the `PermitSingle` EIP-712 typed data, using the
+   settler above as the permit `spender`.
 4. Convert signature to `{r, s, yParity: bool, v}`.
 5. POST `/api/add_order` with `{order, signedPermit}`.
 6. On `{orderHash: "0x..."}`, start polling that hash via
    `/api/order_states`.
 7. On `status = "Filled"` (TitleCase!), consider the order complete.
-   On `"Cancelled"` or `"Expired"`, drop it and free the slot.
+   On `"Canceled"` or `"Expired"`, drop it and free the slot. Note an
+   order may report `"Adding"` (being added, pre-`Active`) or
+   `"PartiallyFilled"` before it reaches a terminal state — see the
+   full `OrderStatus` enum in [orders.md](orders.md).
 8. If you need to cancel early, POST `/api/cancel_order` with the
    hash.
 
-The JS SDK template in `turbineClient.ts` follows this exactly, plus
-handles smart-order callbacks and batch submissions. Our Python
-reference in [examples/minimal_client.py](../examples/minimal_client.py)
-implements the non-smart path.
+The JS SDK's `turbineClient.ts` follows this exactly, plus handles
+smart-order callbacks and batch submissions, and exposes the
+`spreadCurve` builders (`constant` / `auto`).
 
 ## State tracking
 
@@ -128,17 +135,20 @@ Keep a local ledger that associates every submitted order with:
   half-completed submits)
 * `order_hash` (assigned by the server)
 * `side` (buy/sell)
-* `spread_bps` (what you asked for)
-* `eth_price_usd` (mid at submit time)
+* the `spreadCurve` you submitted (so you know the delta you asked for)
+* your price reference at submit time (if your accounting needs it)
 * `expected_buy_atomic` (what you'd get at mid)
-* `fee_atomic` (from `/api/order_fees`, for realized-yield
-  computation)
+* `fee_atomic` (from `/api/order_fees`)
 * current `status` from polling
-* `executed_sell_amount` / `executed_buy_amount` from the latest poll
+* the executed amounts from the latest poll. The execution fields may
+  appear either snake_case (`executed_sell_amount` /
+  `executed_buy_amount`) or camelCase (`soldAmount` / `boughtAmount` /
+  `surplusBoughtAmount`) — handle both tolerantly.
 
-Use that to compute realized PnL, fill rates per spread bucket, and
-time-to-fill distributions. The fee field in particular is essential
-for any honest yield attribution — see [fees.md](fees.md).
+Use that ledger to drive whatever accounting your strategy needs
+(realized PnL, fill rates, time-to-fill). The fee field from
+`/api/order_fees` is needed for any honest yield attribution — see
+[fees.md](fees.md).
 
 ## Error handling
 

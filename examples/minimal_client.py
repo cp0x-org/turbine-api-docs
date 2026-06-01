@@ -6,6 +6,7 @@ A single-file Python reference showing how to:
   * SIWE authenticate
   * read Permit2 nonce on-chain
   * build and EIP-712 sign a Permit2 PermitSingle
+  * build a spreadCurve (flat "constant" curve and a 4-knot "auto" curve)
   * submit an /add_order with the correct yParity convention
   * poll /order_states
   * cancel an order
@@ -39,7 +40,7 @@ from web3 import Web3
 
 
 # ----------------------------------------------------------------------
-# Configuration (production Ethereum mainnet, 2026-04-13)
+# Configuration (production Ethereum mainnet, API v0.114.1)
 # ----------------------------------------------------------------------
 
 API_URL = "https://api.turbine.exchange/api"
@@ -47,10 +48,12 @@ RPC_URL = "https://rpc.mevblocker.io"
 CHAIN_ID = 1
 
 # Pin against these values — /api/config must match on every startup.
-PIN_SETTLER = "0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac"
+# /api/config exposes "version": "0.114.1" and the full token list (~401 tokens,
+# each with CEX oracle mappings); the addresses below are the v0.114.1 deployment.
+PIN_SETTLER = "0xbb3e81c0563dc61719696475f5c7b5e011a73f8a"
 PIN_SIGNER = "0x89c740fea6bd1df86d0f8dff3f4c4c23cb598890"
-PIN_LP_HOOK = "0x40bd6d8c59d43f6c345d79b17234d9b0e781a088"
-PIN_LP_ROUTER = "0x4bd3f2ffc321f3ba4c3b31708212b76922f805a2"
+PIN_LP_HOOK = "0xa44ff524f78858e015fcca322cb7d16aeb89a088"
+PIN_LP_ROUTER = "0x8e7cc22eda4e2d3a8275fd88cf061681b42ce3d1"
 PIN_POOL_MANAGER = "0x000000000004444c5dc75cb358380d2e3de08a90"
 PIN_SIWE_DOMAIN = "app.turbine.exchange"
 PIN_SIWE_URI = "https://api.turbine.exchange/api"
@@ -61,6 +64,17 @@ WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 
 NULL_ADDRESS = "0x0000000000000000000000000000000000000000"
 MAX_UINT160 = (1 << 160) - 1
+
+# SpreadCurve domain (from turbine-sdk/src/constants.ts).
+# deltaBps is signed, 1 unit = 1 bp = 0.01%. Negative = maker better than mid.
+MIN_DELTA_BPS = -10000
+MAX_DELTA_BPS = 9999
+# windowBps = normalized order-window time: 0 = startTime, 10000 = endTime.
+# Interior knots must be in [MIN_WINDOW_BPS, MAX_WINDOW_BPS].
+MIN_WINDOW_BPS = 1
+MAX_WINDOW_BPS = 9999
+# SDK-side DoS guard; the backend enforces a tighter bound by duration/block interval.
+MAX_SPREAD_CURVE_POINTS = 1024
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("turbine")
@@ -99,7 +113,10 @@ class OrderIntent:
     buy_token: str
     sell_amount: int
     min_buy_amount: int
-    mid_price_delta_bps: int
+    # v0.114: the scalar "midPriceDelta" field is gone. Orders carry a
+    # "spreadCurve" — a signed delta curve over the order's time window.
+    # Build one with spread_constant(...) or spread_auto(...).
+    spread_curve: dict[str, Any]
     start_time: int
     end_time: int
     salt: str
@@ -114,7 +131,7 @@ class OrderIntent:
             "buyToken": to_checksum_address(self.buy_token),
             "sellAmount": str(self.sell_amount),
             "minBuyAmount": str(self.min_buy_amount),
-            "midPriceDelta": int(self.mid_price_delta_bps),
+            "spreadCurve": self.spread_curve,
             "startTime": str(self.start_time),
             "endTime": str(self.end_time),
             "partialFill": bool(self.partial_fill),
@@ -131,6 +148,89 @@ class OrderIntent:
 
 def random_salt() -> str:
     return "0x" + secrets.token_bytes(32).hex()
+
+
+def _check_delta_in_domain(value: int, name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an int, got {value!r}")
+    if value < MIN_DELTA_BPS or value > MAX_DELTA_BPS:
+        raise ValueError(
+            f"{name} must be in [{MIN_DELTA_BPS}, {MAX_DELTA_BPS}], got {value}"
+        )
+
+
+def spread_constant(delta_bps: int) -> dict[str, Any]:
+    """Flat spread curve: the same delta across the whole order window.
+
+    Mirrors turbine-sdk `constant(deltaBps)`. This reproduces the old fixed
+    `midPriceDelta` behavior. Negative delta = maker price better than mid.
+    """
+    _check_delta_in_domain(delta_bps, "delta_bps")
+    return {
+        "startDeltaBps": delta_bps,
+        "endDeltaBps": delta_bps,
+        "points": [],
+    }
+
+
+def spread_auto(
+    fast_spread_bps: int,
+    delta_bps: Optional[int] = None,
+    yolo_bps: int = -1000,
+) -> dict[str, Any]:
+    """Four-knot "auto" spread curve (the v0.114 auto-spread order type).
+
+    Mirrors turbine-sdk `auto({ fastSpreadBps, deltaBps?, yoloBps? })`. Anchors:
+
+        windowBps 0     -> yolo_bps                (default -1000)
+        windowBps 1000  -> -fast_spread_bps
+        windowBps 5000  -> fast_spread_bps - delta_bps
+        windowBps 10000 -> fast_spread_bps + delta_bps
+
+    `fast_spread_bps` is required and positive (target "fast"/AMM spread at the
+    window end). The curve starts maker-favorable and ramps to a positive
+    (pay-to-fill) endpoint so the order reliably settles within its window.
+
+    Defaults: delta_bps = max(1, round(fast_spread_bps * 0.2)); yolo_bps = -1000.
+    Guards: yolo_bps < -fast_spread_bps; delta_bps < 2 * fast_spread_bps;
+    fast_spread_bps + delta_bps <= MAX_DELTA_BPS.
+    """
+    if not isinstance(fast_spread_bps, int) or isinstance(fast_spread_bps, bool):
+        raise ValueError(f"fast_spread_bps must be an int, got {fast_spread_bps!r}")
+    if fast_spread_bps < 1 or fast_spread_bps > MAX_DELTA_BPS:
+        raise ValueError(
+            f"fast_spread_bps must be in [1, {MAX_DELTA_BPS}], got {fast_spread_bps}"
+        )
+    if delta_bps is None:
+        delta_bps = max(1, round(fast_spread_bps * 0.2))
+    if not isinstance(delta_bps, int) or isinstance(delta_bps, bool):
+        raise ValueError(f"delta_bps must be an int, got {delta_bps!r}")
+    if delta_bps < 1 or delta_bps > MAX_DELTA_BPS:
+        raise ValueError(
+            f"delta_bps must be in [1, {MAX_DELTA_BPS}], got {delta_bps}"
+        )
+    _check_delta_in_domain(yolo_bps, "yolo_bps")
+    if yolo_bps >= -fast_spread_bps:
+        raise ValueError(
+            f"auto-spread requires yolo_bps ({yolo_bps}) < -fast_spread_bps ({-fast_spread_bps})"
+        )
+    if delta_bps >= 2 * fast_spread_bps:
+        raise ValueError(
+            f"auto-spread requires delta_bps ({delta_bps}) < 2 * fast_spread_bps ({2 * fast_spread_bps})"
+        )
+    if fast_spread_bps + delta_bps > MAX_DELTA_BPS:
+        raise ValueError(
+            f"fast_spread_bps + delta_bps = {fast_spread_bps + delta_bps} "
+            f"exceeds MAX_DELTA_BPS={MAX_DELTA_BPS}"
+        )
+    return {
+        "startDeltaBps": yolo_bps,
+        "endDeltaBps": fast_spread_bps + delta_bps,
+        "points": [
+            {"windowBps": 1000, "deltaBps": -fast_spread_bps},
+            {"windowBps": 5000, "deltaBps": fast_spread_bps - delta_bps},
+        ],
+    }
 
 
 def parse_bigint(value: Any) -> int:
@@ -392,6 +492,14 @@ class MinimalTurbineClient:
         return raw["orderHash"]
 
     def get_order_states(self, order_hashes: list[str]) -> list[dict]:
+        # Returns one entry per requested hash. v0.114 OrderStatus values:
+        #   Active | Filled | PendingCancellation | Canceled | Invalid |
+        #   Expired | Adding | PartiallyFilled | Unknown
+        #   (Adding = order being added, pre-Active.)
+        # Execution amounts may appear camelCase (soldAmount / boughtAmount /
+        # surplusBoughtAmount) in addition to legacy snake_case — read both
+        # tolerantly. The exact per-entry shape is not asserted here; if you
+        # observe a different shape, please open a PR against the docs.
         raw = self._req("POST", "order_states", json_body={"orderHashes": order_hashes})
         assert isinstance(raw, list)
         return raw
@@ -408,6 +516,8 @@ def main() -> int:
         print("FATAL: set WALLET_PRIVATE_KEY env var", file=sys.stderr)
         return 1
 
+    # Your wallet is derived from WALLET_PRIVATE_KEY; account.address below is
+    # the address that owns the orders (e.g. 0x1111...1111 — set your own).
     account = Account.from_key(priv_key)
     client = MinimalTurbineClient(account)
 
@@ -421,6 +531,8 @@ def main() -> int:
     log.info("authenticating via SIWE ...")
     client.authenticate()
     me = client.me()
+    # /api/me returns {"authenticated": bool, "address": "0x..."} where address
+    # is your own wallet (e.g. 0x1111111111111111111111111111111111111111).
     log.info("me: %s", me)
     assert me.get("authenticated"), "SIWE auth failed"
 
@@ -433,7 +545,9 @@ def main() -> int:
         buy_token=USDC,
         sell_amount=int(0.016 * 10**18),  # ~$35 at $2200/ETH
         min_buy_amount=33 * 10**6,         # 33 USDC floor
-        mid_price_delta_bps=-10,           # 10 bps earn side
+        # Flat -10 bps curve (maker better than mid). Swap in spread_auto(...)
+        # for a 4-knot auto-spread order that ramps to a pay-to-fill endpoint.
+        spread_curve=spread_constant(-10),
         start_time=now,
         end_time=now + 3600,
         salt=random_salt(),
@@ -442,14 +556,15 @@ def main() -> int:
     log.info("quoting fee for the intent ...")
     fee_atomic = client.quote_fee(intent)
     log.info("platform fee: %s buy-token atomic units", fee_atomic)
-    # At -10 bps delta you earn ~9 bps net after the ~1 bp platform fee.
+    # /api/order_fees returns the fee in buy-token atomic units — treat it as
+    # the source of truth rather than assuming any fixed bps figure.
 
     log.info("verifying ERC-20 allowance to Permit2 ...")
     erc_allowance = client.read_erc20_allowance_to_permit2(WETH)
     if erc_allowance == 0:
         log.error(
-            "ERC-20 allowance to Permit2 is zero. Run "
-            "WETH.approve(PERMIT2, max) from Rabby/MetaMask first."
+            "ERC-20 allowance to Permit2 is zero. Send a one-time "
+            "WETH.approve(PERMIT2, max) from your wallet first."
         )
         return 1
     log.info("allowance = %s (OK)", erc_allowance)

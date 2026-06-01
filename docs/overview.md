@@ -32,18 +32,48 @@ funds with ETH for gas. From a user perspective this means:
 
 ## What you actually control
 
-The user — or your bot — controls three things per order:
+The user — or your client — controls three things per order:
 
 1. **Token pair, amount, and direction** — what you want to trade.
-2. **`midPriceDelta` in basis points** — your price tolerance relative
-   to the current mid-price. Negative means "I want better than mid"
-   (market maker / earn side). Positive means "I tolerate worse than
-   mid" (taker / fast). Range is `-10000` to `+10000` (±100%).
+2. **`spreadCurve`** — your price tolerance relative to the current
+   mid-price, expressed as a *curve of deltas over the order's time
+   window* rather than a single number. Each delta is signed basis
+   points: negative means "I want better than mid" (market maker /
+   earn side), positive means "I tolerate worse than mid" (taker /
+   fast). A delta's range is `-10000` to `+9999` (`MIN_DELTA_BPS` ..
+   `MAX_DELTA_BPS`). See below and [orders.md](orders.md) for the
+   curve shape.
 3. **Expiry** — `start_time` / `end_time` Unix seconds. Orders
    typically last up to an hour.
 
 Everything else (matching, order book position, execution timing,
 gas optimisation) is the solver's problem.
+
+### From a fixed delta to a spread curve
+
+Earlier deployments carried a single scalar `midPriceDelta` (one fixed
+delta in bps for the whole order). That field is **gone**. An order now
+carries a `spreadCurve`: a piecewise-linear function of *normalised
+window time* (`windowBps`, where `0` = `startTime` and `10000` =
+`endTime`), evaluated at the moment a fill is considered. This lets the
+delta you're willing to accept change as the order ages, so **limit
+orders no longer have to go stale** — you can let an order start
+maker-favourable and become more fill-friendly toward expiry instead of
+resting unfilled.
+
+Two common shapes (the SDK ships builders for both):
+
+* **Constant** — a flat curve where the delta is the same across the
+  whole window. This reproduces the old fixed-`midPriceDelta`
+  behaviour: pick one delta and hold it.
+* **Auto (auto-spread)** — a ramp that starts maker-favourable and
+  rises to a positive (pay-to-fill) delta by the end of the window, so
+  the order is designed to reliably settle before it expires. This is
+  no longer a pure passive-maker order; it trades a worse end-of-window
+  price for a higher fill probability.
+
+See [orders.md](orders.md) for the exact `spreadCurve` request shape,
+the curve bounds, and the constant/auto builders.
 
 ## The three-contract on-chain surface
 
@@ -54,7 +84,7 @@ positions:
 | Contract | Role |
 |---|---|
 | **Permit2** (`0x0000…3ac78BA3`) | Standard Uniswap Permit2. You approve this at the ERC-20 level, then sign per-order `PermitSingle` messages off-chain. Executor calls `transferFrom` through Permit2 at settlement time. |
-| **Turbine Settler** (`0x49e9…73aC`) | The contract that receives the final `settle(...)` call from the executor. This is the `spender` in your signed `PermitSingle`. |
+| **Turbine Settler** (`0xbb3e…73f8a`) | The contract that receives the final `settle(...)` call from the executor. This is the `spender` in your signed `PermitSingle`. |
 | **Turbine Signer / Executor** (`0x89c7…8890`) | The EOA that pays gas and submits settlement transactions. Monitor its balance if you are market-making — if it goes dark, your orders stop settling. |
 | **LP Hook / Router / Pool Manager** | Only relevant if you interact with Turbine's Uniswap-v4-style LP surface. Not needed for plain intents. |
 
@@ -63,26 +93,30 @@ flow, and [api-reference.md](api-reference.md) for the
 `GET /api/config` endpoint that returns these addresses (and which you
 should pin).
 
+`GET /api/config` also returns the **supported token list**, which has
+grown substantially (now on the order of a few hundred tokens), each
+with CEX oracle mappings (binance / bingx / bitget / coinbase / kraken
+/ kucoin / okx). Do not hardcode the list — read it from the config
+endpoint. The two tokens used throughout these docs as examples are
+USDC (`0xA0b8…eB48`) and WETH (`0xC02a…56Cc2`).
+
 ## The executor (operational reality)
 
 The executor wallet is a **single EOA** that signs and submits every
-Turbine settlement. At the time of this writing (2026-04-13) we
-observe:
+Turbine settlement. A few operational characteristics are worth
+knowing:
 
-* Nonce ~137 over the wallet's entire lifetime — small total Alpha
-  volume.
-* Balance around ~0.0045 ETH at most observations, indicating
-  **just-in-time funding** (PropellerHeads tops up shortly before
-  they need to settle).
+* Its ETH balance tends to be kept low and topped up
+  **just-in-time** — PropellerHeads funds it shortly before they need
+  to settle, rather than holding a large standing balance.
 * Settlement transactions batch multiple orders into one tx where
-  possible; the actual on-chain method selector is `0xfdcc8090`
+  possible; the on-chain method selector is `0xfdcc8090`
   (`settle` on the Turbine Settler contract).
 
-If you run an automated client, treat executor balance as a soft
-signal — warn when it drops below ~0.01 ETH, but do not halt on it
-(you do not control it). The [bot we built for our own MM
-experiment](https://github.com/illlefr4u/turbine-apy) uses a 5-minute
-periodic executor-balance poll and surfaces warnings only.
+If you run an automated client, treat the executor balance as a soft
+signal only — it can be useful to warn when it drops very low (e.g.
+below ~0.01 ETH), but do not halt your own logic on it, since you do
+not control it and just-in-time funding makes a low balance normal.
 
 ## Alpha caveats
 
@@ -96,6 +130,8 @@ periodic executor-balance poll and surfaces warnings only.
 * **Minimum order size.** Server rejects anything worth less than
   **$30 USD** with `HTTP 400 INPUT_VALIDATION_ERROR` — see
   [orders.md](orders.md).
-* **No public changelog.** The backend can (and did during our
-  integration) change enum spellings and serialization details. Pin
-  the `/api/config` fields and validate responses strictly.
+* **No public changelog.** The backend has changed enum spellings and
+  serialization details between deployments (a full redeploy bumped the
+  API to `version: "0.114.1"` and rotated the settler/LP contract
+  addresses). Pin the `/api/config` fields and validate responses
+  strictly.

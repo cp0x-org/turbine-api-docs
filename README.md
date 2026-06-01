@@ -6,10 +6,11 @@ Community-maintained reference for the **Turbine Alpha** HTTP API by
 > **Disclaimer.** This is **not** official documentation. It is a
 > reverse-engineered reference reconstructed from the public
 > `app.turbine.exchange` JavaScript source map (shipped with source
-> maps enabled as of 2026-04-13) and verified against the live
-> production API. Accuracy reflects observations on that date; Turbine
-> is in Alpha and the API may change without notice. For official
-> information see [docs.propellerheads.xyz](https://docs.propellerheads.xyz)
+> maps enabled) and verified against the live production API. This
+> revision tracks API **v0.114.1** (as reported by `/api/config`).
+> Turbine is in Alpha and the API may change without notice. For
+> official information see
+> [docs.propellerheads.xyz](https://docs.propellerheads.xyz)
 > (Turbine Docs listed as "soon" at the time of writing).
 
 ## For AI agents / LLMs
@@ -44,7 +45,8 @@ saves you a few hours.
   `/order_states`, `/order_fees`, `/add_liquidity`, `/remove_liquidity`,
   `/liquidity_intent_states`
 - **[docs/orders.md](docs/orders.md)** — `OrderIntent` field semantics,
-  `midPriceDelta` bps meaning, partial fills, expiry, salt, minimum
+  `spreadCurve` (delta curve over the order window; replaces the old
+  scalar `midPriceDelta`), partial fills, expiry, salt, minimum
   order size
 - **[docs/permit2.md](docs/permit2.md)** — on-chain ERC-20 approval,
   `PermitSingle` EIP-712 typed-data signing, nonce semantics, settler
@@ -67,23 +69,29 @@ saves you a few hours.
   itself is **not** EIP-712 signed)
 - **Minimum order size:** **$30 USD** (enforced server-side with
   HTTP 400 `INPUT_VALIDATION_ERROR`)
-- **Platform fee:** ~**0.99 bps** (0.0099%) of the mid-price notional,
-  flat across size / side / delta — see [docs/fees.md](docs/fees.md)
+- **Platform fee:** query `/api/order_fees` (returns the fee in
+  buy-token atomic units) — this is the source of truth. A previously
+  observed "~0.99 bps flat" figure was an empirical reading on an older
+  deployment and is **unverified** for v0.114 — see
+  [docs/fees.md](docs/fees.md)
 - **BigInt wire format:** hex strings with `0x` prefix in responses;
   input accepts both decimal and hex
 - **Polling:** `/order_states` is the primary fill source; the
   official JS SDK polls every 6 s with a client-side concurrency lock
-- **Status enum seen in the wild:** `"Active"` (TitleCase) for resting
-  orders; other values inferred but not yet verified
+- **Order status enum (v0.114, TitleCase):** `Active`, `Filled`,
+  `PendingCancellation`, `Canceled`, `Invalid`, `Expired`, `Adding`,
+  `PartiallyFilled`, `Unknown` (`Adding` = order being added, pre-`Active`).
+  `"Active"` is confirmed for resting orders; other values are taken from
+  the SDK enum and not all directly observed
 
-## Known contract addresses (Ethereum mainnet, 2026-04-13)
+## Known contract addresses (Ethereum mainnet, v0.114.1)
 
 | Role | Address |
 |------|---------|
-| Turbine Settler | `0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac` |
+| Turbine Settler | `0xbb3e81c0563dc61719696475f5c7b5e011a73f8a` |
 | Turbine Signer (gas-paying executor) | `0x89c740fea6bd1df86d0f8dff3f4c4c23cb598890` |
-| LP Hook | `0x40bd6d8c59d43f6c345d79b17234d9b0e781a088` |
-| LP Router | `0x4bd3f2ffc321f3ba4c3b31708212b76922f805a2` |
+| LP Hook | `0xa44ff524f78858e015fcca322cb7d16aeb89a088` |
+| LP Router | `0x8e7cc22eda4e2d3a8275fd88cf061681b42ce3d1` |
 | Uniswap v4 Pool Manager | `0x000000000004444c5dc75cb358380d2e3de08a90` |
 | Permit2 (standard Uniswap) | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
 
@@ -93,16 +101,22 @@ indicates an API / deployment change and your client should halt.
 
 ## Supported tokens
 
-The SDK constants ship with: USDC, USDT, DAI, UNI, WETH, WEETH, PEPE,
-WBTC. The `app.turbine.exchange` UI at the time of writing only
-exposes USDC / WETH, but the SDK and server accept any registered
-token pair.
+The full token list is returned by `/api/config` (v0.114 ships a much
+larger set — on the order of several hundred tokens — each with CEX
+oracle mappings: binance / bingx / bitget / coinbase / kraken / kucoin /
+okx). Do not hardcode it; read it from `/api/config`. As examples,
+USDC (`0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48`) and WETH
+(`0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`) are present. The
+`app.turbine.exchange` UI may expose only a subset (USDC / WETH), but
+the server accepts any registered token pair.
 
 ## Accuracy and contributions
 
-Everything here was verified by sending real (or quote-only) requests
-against production Turbine on 2026-04-13. If you spot something that
-has changed or is wrong, please open an issue or PR —
+Most of this was verified by sending real (or quote-only) requests
+against production Turbine; this revision reflects API v0.114.1. Some
+response shapes are taken from the SDK source and are not all directly
+verified — those are flagged where they appear. If you spot something
+that has changed or is wrong, please open an issue or PR —
 [CONTRIBUTING.md](CONTRIBUTING.md) has the process.
 
 ## License

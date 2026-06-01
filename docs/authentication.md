@@ -59,7 +59,9 @@ Issued At: 2026-04-13T00:00:00.000Z
 Fields:
 
 * **Domain** (line 1): must be `app.turbine.exchange`. Pin this.
-* **Address** (line 2): EIP-55 checksummed wallet address.
+* **Address** (line 2): EIP-55 checksummed wallet address (the
+  `0x1111…1111` above is a placeholder — substitute `<your wallet
+  address>`).
 * **Statement** (line 4): must be exactly
   `"Sign in to Turbine with your Ethereum wallet"`.
 * **URI**: `https://api.turbine.exchange/api`. Pin this.

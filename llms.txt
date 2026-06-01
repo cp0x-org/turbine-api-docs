@@ -2,8 +2,8 @@
 
 > Community-maintained reference for the Turbine Alpha HTTP API by
 > PropellerHeads. Reverse-engineered from the public
-> `app.turbine.exchange` source map and verified against production
-> on 2026-04-13. Not affiliated with PropellerHeads.
+> `app.turbine.exchange` source map; tracks API **v0.114.1**
+> (see `/api/config` `version`). Not affiliated with PropellerHeads.
 
 Turbine is an intent-based DEX ("dark solver") by PropellerHeads.
 Users sign off-chain `OrderIntent` messages + Permit2 typed data;
@@ -20,12 +20,18 @@ Docs" as "soon" on their site.
 - Order signing: Permit2 `PermitSingle` EIP-712 (the `OrderIntent`
   itself is NOT signed)
 - Minimum order value: **$30 USD**, enforced server-side
-- Platform fee: **~0.99 bps** (0.0099%) flat of mid-price notional,
-  deducted from order creator's realized spread
+- Platform fee: query `/api/order_fees` (returns the fee in buy-token
+  atomic units) — it is the source of truth. A prior "~0.99 bps flat"
+  figure was an empirical observation on an older deployment and is
+  unverified for v0.114
 - BigInts in responses: hex-prefixed strings ("0x1a")
 - `yParity` in signatures: **bool for `/add_order`**, **hex string
   for `/verify`** (two different Rust structs server-side)
-- Status enum seen: `"Active"` (TitleCase) for resting orders
+- Order spread field: `spreadCurve` (a delta curve over the order
+  window) — replaces the old scalar `midPriceDelta`
+- Order status enum (TitleCase): `Active`, `Filled`,
+  `PendingCancellation`, `Canceled`, `Invalid`, `Expired`, `Adding`,
+  `PartiallyFilled`, `Unknown`
 
 ## Docs
 
@@ -36,7 +42,7 @@ Docs" as "soon" on their site.
 - [Orders](docs/orders.md): `OrderIntent` fields, lifecycle, min size
 - [Permit2](docs/permit2.md): ERC-20 approval + `PermitSingle` signing
 - [Wire format](docs/wire-format.md): hex bigints, yParity dual convention
-- [Fees](docs/fees.md): platform fee measurement + impact on MM yield
+- [Fees](docs/fees.md): platform fee via `/api/order_fees`
 - [Integration guide](docs/integration-guide.md): pragmatic client-building notes
 
 ## Examples

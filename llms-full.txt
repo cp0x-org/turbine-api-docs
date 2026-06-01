@@ -15,10 +15,11 @@ Community-maintained reference for the **Turbine Alpha** HTTP API by
 > **Disclaimer.** This is **not** official documentation. It is a
 > reverse-engineered reference reconstructed from the public
 > `app.turbine.exchange` JavaScript source map (shipped with source
-> maps enabled as of 2026-04-13) and verified against the live
-> production API. Accuracy reflects observations on that date; Turbine
-> is in Alpha and the API may change without notice. For official
-> information see [docs.propellerheads.xyz](https://docs.propellerheads.xyz)
+> maps enabled) and verified against the live production API. This
+> revision tracks API **v0.114.1** (as reported by `/api/config`).
+> Turbine is in Alpha and the API may change without notice. For
+> official information see
+> [docs.propellerheads.xyz](https://docs.propellerheads.xyz)
 > (Turbine Docs listed as "soon" at the time of writing).
 
 ## For AI agents / LLMs
@@ -53,7 +54,8 @@ saves you a few hours.
   `/order_states`, `/order_fees`, `/add_liquidity`, `/remove_liquidity`,
   `/liquidity_intent_states`
 - **[docs/orders.md](docs/orders.md)** — `OrderIntent` field semantics,
-  `midPriceDelta` bps meaning, partial fills, expiry, salt, minimum
+  `spreadCurve` (delta curve over the order window; replaces the old
+  scalar `midPriceDelta`), partial fills, expiry, salt, minimum
   order size
 - **[docs/permit2.md](docs/permit2.md)** — on-chain ERC-20 approval,
   `PermitSingle` EIP-712 typed-data signing, nonce semantics, settler
@@ -76,23 +78,29 @@ saves you a few hours.
   itself is **not** EIP-712 signed)
 - **Minimum order size:** **$30 USD** (enforced server-side with
   HTTP 400 `INPUT_VALIDATION_ERROR`)
-- **Platform fee:** ~**0.99 bps** (0.0099%) of the mid-price notional,
-  flat across size / side / delta — see [docs/fees.md](docs/fees.md)
+- **Platform fee:** query `/api/order_fees` (returns the fee in
+  buy-token atomic units) — this is the source of truth. A previously
+  observed "~0.99 bps flat" figure was an empirical reading on an older
+  deployment and is **unverified** for v0.114 — see
+  [docs/fees.md](docs/fees.md)
 - **BigInt wire format:** hex strings with `0x` prefix in responses;
   input accepts both decimal and hex
 - **Polling:** `/order_states` is the primary fill source; the
   official JS SDK polls every 6 s with a client-side concurrency lock
-- **Status enum seen in the wild:** `"Active"` (TitleCase) for resting
-  orders; other values inferred but not yet verified
+- **Order status enum (v0.114, TitleCase):** `Active`, `Filled`,
+  `PendingCancellation`, `Canceled`, `Invalid`, `Expired`, `Adding`,
+  `PartiallyFilled`, `Unknown` (`Adding` = order being added, pre-`Active`).
+  `"Active"` is confirmed for resting orders; other values are taken from
+  the SDK enum and not all directly observed
 
-## Known contract addresses (Ethereum mainnet, 2026-04-13)
+## Known contract addresses (Ethereum mainnet, v0.114.1)
 
 | Role | Address |
 |------|---------|
-| Turbine Settler | `0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac` |
+| Turbine Settler | `0xbb3e81c0563dc61719696475f5c7b5e011a73f8a` |
 | Turbine Signer (gas-paying executor) | `0x89c740fea6bd1df86d0f8dff3f4c4c23cb598890` |
-| LP Hook | `0x40bd6d8c59d43f6c345d79b17234d9b0e781a088` |
-| LP Router | `0x4bd3f2ffc321f3ba4c3b31708212b76922f805a2` |
+| LP Hook | `0xa44ff524f78858e015fcca322cb7d16aeb89a088` |
+| LP Router | `0x8e7cc22eda4e2d3a8275fd88cf061681b42ce3d1` |
 | Uniswap v4 Pool Manager | `0x000000000004444c5dc75cb358380d2e3de08a90` |
 | Permit2 (standard Uniswap) | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
 
@@ -102,16 +110,22 @@ indicates an API / deployment change and your client should halt.
 
 ## Supported tokens
 
-The SDK constants ship with: USDC, USDT, DAI, UNI, WETH, WEETH, PEPE,
-WBTC. The `app.turbine.exchange` UI at the time of writing only
-exposes USDC / WETH, but the SDK and server accept any registered
-token pair.
+The full token list is returned by `/api/config` (v0.114 ships a much
+larger set — on the order of several hundred tokens — each with CEX
+oracle mappings: binance / bingx / bitget / coinbase / kraken / kucoin /
+okx). Do not hardcode it; read it from `/api/config`. As examples,
+USDC (`0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48`) and WETH
+(`0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`) are present. The
+`app.turbine.exchange` UI may expose only a subset (USDC / WETH), but
+the server accepts any registered token pair.
 
 ## Accuracy and contributions
 
-Everything here was verified by sending real (or quote-only) requests
-against production Turbine on 2026-04-13. If you spot something that
-has changed or is wrong, please open an issue or PR —
+Most of this was verified by sending real (or quote-only) requests
+against production Turbine; this revision reflects API v0.114.1. Some
+response shapes are taken from the SDK source and are not all directly
+verified — those are flagged where they appear. If you spot something
+that has changed or is wrong, please open an issue or PR —
 [CONTRIBUTING.md](CONTRIBUTING.md) has the process.
 
 ## License
@@ -163,18 +177,48 @@ funds with ETH for gas. From a user perspective this means:
 
 ## What you actually control
 
-The user — or your bot — controls three things per order:
+The user — or your client — controls three things per order:
 
 1. **Token pair, amount, and direction** — what you want to trade.
-2. **`midPriceDelta` in basis points** — your price tolerance relative
-   to the current mid-price. Negative means "I want better than mid"
-   (market maker / earn side). Positive means "I tolerate worse than
-   mid" (taker / fast). Range is `-10000` to `+10000` (±100%).
+2. **`spreadCurve`** — your price tolerance relative to the current
+   mid-price, expressed as a *curve of deltas over the order's time
+   window* rather than a single number. Each delta is signed basis
+   points: negative means "I want better than mid" (market maker /
+   earn side), positive means "I tolerate worse than mid" (taker /
+   fast). A delta's range is `-10000` to `+9999` (`MIN_DELTA_BPS` ..
+   `MAX_DELTA_BPS`). See below and [orders.md](orders.md) for the
+   curve shape.
 3. **Expiry** — `start_time` / `end_time` Unix seconds. Orders
    typically last up to an hour.
 
 Everything else (matching, order book position, execution timing,
 gas optimisation) is the solver's problem.
+
+### From a fixed delta to a spread curve
+
+Earlier deployments carried a single scalar `midPriceDelta` (one fixed
+delta in bps for the whole order). That field is **gone**. An order now
+carries a `spreadCurve`: a piecewise-linear function of *normalised
+window time* (`windowBps`, where `0` = `startTime` and `10000` =
+`endTime`), evaluated at the moment a fill is considered. This lets the
+delta you're willing to accept change as the order ages, so **limit
+orders no longer have to go stale** — you can let an order start
+maker-favourable and become more fill-friendly toward expiry instead of
+resting unfilled.
+
+Two common shapes (the SDK ships builders for both):
+
+* **Constant** — a flat curve where the delta is the same across the
+  whole window. This reproduces the old fixed-`midPriceDelta`
+  behaviour: pick one delta and hold it.
+* **Auto (auto-spread)** — a ramp that starts maker-favourable and
+  rises to a positive (pay-to-fill) delta by the end of the window, so
+  the order is designed to reliably settle before it expires. This is
+  no longer a pure passive-maker order; it trades a worse end-of-window
+  price for a higher fill probability.
+
+See [orders.md](orders.md) for the exact `spreadCurve` request shape,
+the curve bounds, and the constant/auto builders.
 
 ## The three-contract on-chain surface
 
@@ -185,7 +229,7 @@ positions:
 | Contract | Role |
 |---|---|
 | **Permit2** (`0x0000…3ac78BA3`) | Standard Uniswap Permit2. You approve this at the ERC-20 level, then sign per-order `PermitSingle` messages off-chain. Executor calls `transferFrom` through Permit2 at settlement time. |
-| **Turbine Settler** (`0x49e9…73aC`) | The contract that receives the final `settle(...)` call from the executor. This is the `spender` in your signed `PermitSingle`. |
+| **Turbine Settler** (`0xbb3e…73f8a`) | The contract that receives the final `settle(...)` call from the executor. This is the `spender` in your signed `PermitSingle`. |
 | **Turbine Signer / Executor** (`0x89c7…8890`) | The EOA that pays gas and submits settlement transactions. Monitor its balance if you are market-making — if it goes dark, your orders stop settling. |
 | **LP Hook / Router / Pool Manager** | Only relevant if you interact with Turbine's Uniswap-v4-style LP surface. Not needed for plain intents. |
 
@@ -194,26 +238,30 @@ flow, and [api-reference.md](api-reference.md) for the
 `GET /api/config` endpoint that returns these addresses (and which you
 should pin).
 
+`GET /api/config` also returns the **supported token list**, which has
+grown substantially (now on the order of a few hundred tokens), each
+with CEX oracle mappings (binance / bingx / bitget / coinbase / kraken
+/ kucoin / okx). Do not hardcode the list — read it from the config
+endpoint. The two tokens used throughout these docs as examples are
+USDC (`0xA0b8…eB48`) and WETH (`0xC02a…56Cc2`).
+
 ## The executor (operational reality)
 
 The executor wallet is a **single EOA** that signs and submits every
-Turbine settlement. At the time of this writing (2026-04-13) we
-observe:
+Turbine settlement. A few operational characteristics are worth
+knowing:
 
-* Nonce ~137 over the wallet's entire lifetime — small total Alpha
-  volume.
-* Balance around ~0.0045 ETH at most observations, indicating
-  **just-in-time funding** (PropellerHeads tops up shortly before
-  they need to settle).
+* Its ETH balance tends to be kept low and topped up
+  **just-in-time** — PropellerHeads funds it shortly before they need
+  to settle, rather than holding a large standing balance.
 * Settlement transactions batch multiple orders into one tx where
-  possible; the actual on-chain method selector is `0xfdcc8090`
+  possible; the on-chain method selector is `0xfdcc8090`
   (`settle` on the Turbine Settler contract).
 
-If you run an automated client, treat executor balance as a soft
-signal — warn when it drops below ~0.01 ETH, but do not halt on it
-(you do not control it). The [bot we built for our own MM
-experiment](https://github.com/illlefr4u/turbine-apy) uses a 5-minute
-periodic executor-balance poll and surfaces warnings only.
+If you run an automated client, treat the executor balance as a soft
+signal only — it can be useful to warn when it drops very low (e.g.
+below ~0.01 ETH), but do not halt your own logic on it, since you do
+not control it and just-in-time funding makes a low balance normal.
 
 ## Alpha caveats
 
@@ -227,9 +275,11 @@ periodic executor-balance poll and surfaces warnings only.
 * **Minimum order size.** Server rejects anything worth less than
   **$30 USD** with `HTTP 400 INPUT_VALIDATION_ERROR` — see
   [orders.md](orders.md).
-* **No public changelog.** The backend can (and did during our
-  integration) change enum spellings and serialization details. Pin
-  the `/api/config` fields and validate responses strictly.
+* **No public changelog.** The backend has changed enum spellings and
+  serialization details between deployments (a full redeploy bumped the
+  API to `version: "0.114.1"` and rotated the settler/LP contract
+  addresses). Pin the `/api/config` fields and validate responses
+  strictly.
 
 ==============================================================
 # docs/authentication.md
@@ -296,7 +346,9 @@ Issued At: 2026-04-13T00:00:00.000Z
 Fields:
 
 * **Domain** (line 1): must be `app.turbine.exchange`. Pin this.
-* **Address** (line 2): EIP-55 checksummed wallet address.
+* **Address** (line 2): EIP-55 checksummed wallet address (the
+  `0x1111…1111` above is a placeholder — substitute `<your wallet
+  address>`).
 * **Statement** (line 4): must be exactly
   `"Sign in to Turbine with your Ethereum wallet"`.
 * **URI**: `https://api.turbine.exchange/api`. Pin this.
@@ -421,16 +473,27 @@ and halt if they do not match.
 
 ```json
 {
-  "turbineSettlerAddress": "0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac",
+  "version": "0.114.1",
+  "turbineSettlerAddress": "0xbb3e81c0563dc61719696475f5c7b5e011a73f8a",
   "turbineSignerAddress": "0x89c740fea6bd1df86d0f8dff3f4c4c23cb598890",
-  "lpHookAddress": "0x40bd6d8c59d43f6c345d79b17234d9b0e781a088",
-  "lpRouterAddress": "0x4bd3f2ffc321f3ba4c3b31708212b76922f805a2",
+  "lpHookAddress": "0xa44ff524f78858e015fcca322cb7d16aeb89a088",
+  "lpRouterAddress": "0x8e7cc22eda4e2d3a8275fd88cf061681b42ce3d1",
   "poolManagerAddress": "0x000000000004444c5dc75cb358380d2e3de08a90",
   "submitSettlements": true,
   "siweDomain": "app.turbine.exchange",
-  "siweUri": "https://api.turbine.exchange/api"
+  "siweUri": "https://api.turbine.exchange/api",
+  "tokens": [ /* ... */ ]
 }
 ```
+
+`version` reports the deployment (`0.114.1` at the time of writing).
+`config.tokens` is the supported-token list returned by the server
+(~401 entries, each with CEX oracle mappings such as
+`binance`/`bingx`/`bitget`/`coinbase`/`kraken`/`kucoin`/`okx`). Do not
+hard-code it — read it from `/api/config`. The pair used throughout
+these examples is WETH
+(`0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`) / USDC
+(`0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48`).
 
 ## Authentication
 
@@ -472,6 +535,9 @@ Empty-body 200 on success, sets cookie. See
 }
 ```
 
+`address` is your authenticated wallet (the placeholder above stands
+in for `<your wallet address>`).
+
 ### `POST /api/logout`
 
 No body. Clears the server-side session.
@@ -490,7 +556,11 @@ Submit a single order. Body for standard (non-smart-callback) orders:
     "buyToken":  "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
     "sellAmount":    "16000000000000000",
     "minBuyAmount":  "33000000",
-    "midPriceDelta": -10,
+    "spreadCurve": {
+      "startDeltaBps": -10,
+      "endDeltaBps":   -10,
+      "points":        []
+    },
     "startTime":     "1776048000",
     "endTime":       "1776051600",
     "partialFill":   true,
@@ -512,12 +582,18 @@ Submit a single order. Body for standard (non-smart-callback) orders:
         "expiration": 1776051600,
         "nonce":      0
       },
-      "spender":     "0x49E9A8EA9B6C05d5B2307538D159350A5aEa73aC",
+      "spender":     "0xbb3e81c0563dc61719696475f5c7b5e011a73f8a",
       "sigDeadline": "1776051600"
     }
   }
 }
 ```
+
+The `spreadCurve` above is a flat curve (`startDeltaBps == endDeltaBps`,
+no interior `points`), equivalent to the old fixed `midPriceDelta` of
+`-10` bps. `spender` equals the `turbineSettlerAddress` returned by
+`/api/config`. See the **Spread curves** section below for the full
+shape.
 
 Response:
 
@@ -534,15 +610,68 @@ Important details:
 * **Minimum order size is enforced at $30 USD**. Smaller values fail
   with HTTP 400 `INPUT_VALIDATION_ERROR` and a message like
   `"Sell amount X is worth ~$19.97 which is less than $30"`.
-* **`midPriceDelta` is a signed int**, not a string. Negative values
-  (MM "earn" side) and positive values (taker "fast" side) are both
-  valid. Range `-10000..+10000` = ±100%.
+* **`spreadCurve` replaces the old scalar `midPriceDelta`** (which is
+  gone in v0.114). It is a delta curve over the order's time window —
+  see **Spread curves** below. Each `deltaBps` is a signed int in
+  `[-10000, 9999]` (1 unit = 1 bp = 0.01%); negative is maker-favorable
+  ("earn"), positive is pay-to-fill ("fast").
 * **Permit2 `amount`** in the example is `maxUint160 = 2^160 - 1`
   (unlimited approval); you can specify a tighter amount if you want
   per-order cap.
 * **`callData` / `callDataTarget`** non-empty makes this a "smart
   order"; then `signedPermit` is omitted — see the smart-order section
   below.
+
+#### Spread curves
+
+A `spreadCurve` carries the order's price delta as a piecewise-linear
+curve over the order's *normalized* time window:
+
+```json
+{
+  "startDeltaBps": -10,
+  "endDeltaBps":   -10,
+  "points": [ { "windowBps": 5000, "deltaBps": -5 } ]
+}
+```
+
+* `windowBps` is normalized time from `0` (= `startTime`) to `10000`
+  (= `endTime`); interior knots are in `[1, 9999]`.
+* `deltaBps` is signed, `[-10000, 9999]` (1 unit = 1 bp = 0.01%).
+* `startDeltaBps` is the delta at `windowBps = 0`, `endDeltaBps` at
+  `windowBps = 10000`. Interior knots go in `points`.
+* The effective delta at time `now` is linear interpolation between
+  the surrounding knots.
+* `points` may hold up to `MAX_SPREAD_CURVE_POINTS = 1024` knots (an
+  SDK guard; the backend may be stricter by order duration / block
+  interval).
+
+The official JS SDK (`turbine-sdk/src/spreads.ts`) ships two builders:
+
+* **`constant(deltaBps)`** → `{ startDeltaBps: d, endDeltaBps: d,
+  points: [] }`. A flat curve — this reproduces the old fixed
+  `midPriceDelta` behavior.
+* **`auto({ fastSpreadBps, deltaBps?, yoloBps? })`** → a 4-knot ramp
+  ("auto-spread", a new order shape). `fastSpreadBps` is **required and
+  positive** (the target "fast"/AMM spread reached by the end of the
+  window). The anchors are:
+
+  | `windowBps` | `deltaBps`                |
+  |-------------|---------------------------|
+  | `0`         | `yoloBps`                 |
+  | `1000`      | `-fastSpreadBps`          |
+  | `5000`      | `fastSpreadBps - deltaBps`|
+  | `10000`     | `fastSpreadBps + deltaBps`|
+
+  Defaults: `deltaBps = max(1, round(fastSpreadBps * 0.2))`,
+  `yoloBps = -1000`. The builder rejects parameters that break
+  monotonicity or exceed the domain: it requires
+  `yoloBps < -fastSpreadBps`, `deltaBps < 2 * fastSpreadBps`, and
+  `fastSpreadBps + deltaBps <= 9999`.
+
+  An auto curve starts maker-favorable and ramps to a positive
+  (pay-to-fill) end, so the order is designed to settle within its
+  window rather than rest as a stale limit order.
 
 ### `POST /api/add_orders`
 
@@ -588,16 +717,33 @@ Response is an array:
 ]
 ```
 
-`status` strings seen in the wild:
+`status` is one of the v0.114 `OrderStatus` values (SDK
+`types/orders.ts`):
 
-* **`"Active"`** — resting in the book, no fills yet.
+* `Active` — resting in the book, no fills yet.
+* `Adding` — order is being added, pre-`Active`.
+* `Filled`
+* `PartiallyFilled`
+* `PendingCancellation`
+* `Canceled`
+* `Expired`
+* `Invalid`
+* `Unknown`
 
-Other enum values (`Filled`, `PartiallyFilled`, `Cancelled`, `Expired`)
-are inferred from the SDK's TypeScript typing but **not directly
-verified** at the time of writing. Please PR if you observe them.
+The SDK groups `Adding`, `Active`, and `PendingCancellation` as
+"pending". Only `Active` is **directly verified** here; the other
+strings are taken from the SDK enum but **not directly verified** at
+the time of writing. Please PR if you observe them.
 
-`execution[].sold_amount` / `bought_amount` / `surplus_buy_amount` are
-hex-prefixed bigint strings — parse with a base-0 int parser.
+`execution[]` amounts are hex-prefixed bigint strings — parse with a
+base-0 int parser. Be tolerant of casing: a legacy snake_case form
+(`tx_hash`, `block_number`, `sold_amount`, `bought_amount`,
+`surplus_buy_amount`) and a camelCase form (`txHash`, `blockNumber`,
+`soldAmount`, `boughtAmount`, and a surplus field — the SDK reads it as
+`surplusBuyAmount`) have both been referenced. The official SDK parses
+the camelCase shape. The exact on-the-wire casing is **not fully
+verified** — read whichever key is present rather than relying on one
+form.
 
 ### `POST /api/order_fees`
 
@@ -619,9 +765,10 @@ token's atomic units**:
 "0xd8d"
 ```
 
-Value is `0xd8d = 3469` atomic units in the example. See
-[fees.md](fees.md) for how to interpret this — spoiler: it works out
-to ~0.99 bps (0.0099%) of the mid-price notional, flat.
+Value is `0xd8d = 3469` atomic units in the example. This endpoint is
+the source of truth for the fee — quote it per order rather than
+assuming a fixed rate. See [fees.md](fees.md) for how to interpret the
+returned amount.
 
 ## Liquidity endpoints (LP side)
 
@@ -730,18 +877,18 @@ EIP-712 signed — only the Permit2 permit is.
 
 ```jsonc
 {
-  "owner":          "0x1111111111111111111111111111111111111111", // must match SIWE-authed wallet
+  "owner":          "0x1111111111111111111111111111111111111111", // <your wallet address>, must match SIWE-authed wallet
   "sellToken":      "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // EIP-55 checksummed address
   "buyToken":       "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // EIP-55 checksummed, != sellToken
   "sellAmount":     "16000000000000000",  // string, atomic units, > 0
   "minBuyAmount":   "33000000",           // string, atomic units, > 0 — hard floor on execution
-  "midPriceDelta":  -10,                  // int16 bps, -10000..+10000
+  "spreadCurve":    { "startDeltaBps": -10, "endDeltaBps": -10, "points": [] }, // delta curve over the order window (replaces midPriceDelta)
   "startTime":      "1776048000",         // string, unix seconds
   "endTime":        "1776051600",         // string, unix seconds, > startTime, in the future
   "partialFill":    true,                 // bool, frontend always sets true
   "callData":       "0x",                 // hex string, 0x for non-smart orders
   "callDataTarget": "0x0000000000000000000000000000000000000000", // address, 0x0 for non-smart
-  "salt":           "0x1111...1111"  // 32 random bytes as hex
+  "salt":           "0x1111111111111111111111111111111111111111111111111111111111111111"  // 32 random bytes as hex
 }
 ```
 
@@ -754,9 +901,12 @@ raises `UNAUTHORIZED` locally.
 ### `sellToken` / `buyToken`
 
 Must be different. Use EIP-55 checksummed addresses
-(`Web3.to_checksum_address` in Python). The SDK constants ship with
-USDC, USDT, DAI, UNI, WETH, WEETH, PEPE, WBTC on mainnet; the frontend
-currently exposes only USDC/WETH.
+(`Web3.to_checksum_address` in Python). The full set of supported tokens
+is returned by `GET /api/config` (each entry carries CEX oracle mappings).
+Do not hardcode the list — read it from `/api/config`. As of v0.114 it is
+much larger than earlier deployments. Two common examples are
+WETH (`0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2`) and
+USDC (`0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48`).
 
 ### `sellAmount`
 
@@ -776,21 +926,94 @@ mid of $2192.63 expects ~35.08 USDC. Setting `minBuyAmount = 33
 USDC` gives a ~5.9% safety floor below mid and ensures you do not
 get picked off during a price crash between build and settlement.
 
-### `midPriceDelta`
+### `spreadCurve`
 
-Signed integer in **basis points**. Range `-10000..+10000` (±100%).
+**Replaces the old scalar `midPriceDelta` field (removed in v0.114).**
+Instead of one fixed delta, an order now carries a **delta curve over
+its own time window** — the price offset the solver applies can change
+between `startTime` and `endTime`.
 
-* **Negative = "I demand better than mid price"** — market maker /
-  earn side. Example `-15` means "fill me at no worse than 15 bps
-  better than the current mid". This is where your spread lives.
-* **Positive = "I tolerate worse than mid price"** — taker / fast
-  side. Example `+50` means "fill me even if the price is 50 bps
-  worse than mid". This is where urgency buys execution certainty.
-* **Zero** = fill at exactly the mid price.
+```jsonc
+"spreadCurve": {
+  "startDeltaBps": -10,   // int, delta at windowBps = 0 (= startTime)
+  "endDeltaBps":   -10,   // int, delta at windowBps = 10000 (= endTime)
+  "points": [             // interior knots, may be empty
+    { "windowBps": 5000, "deltaBps": -5 }
+  ]
+}
+```
 
-This value is sent as a **JSON integer**, not a string. The SDK uses
-`Decimal` percentages in its frontend abstraction (e.g. user enters
-`0.0028` for 28 bps and the SDK multiplies by 10,000 and rounds).
+* **`windowBps`** = normalized order-window *time*, not price. `0` is
+  `startTime`, `10000` is `endTime`; interior knots live in `[1, 9999]`.
+* **`deltaBps`** = signed delta, **1 unit = 1 basis point (0.01%)**.
+  Domain is `[MIN_DELTA_BPS = -10000, MAX_DELTA_BPS = 9999]`.
+  * **Negative = "I demand better than mid price"** — market maker /
+    earn side. Example `-15` means "fill me at no worse than 15 bps
+    better than the current mid". This is where your spread lives.
+  * **Positive = "I tolerate worse than mid price"** — taker / fast
+    side. Example `+50` means "fill me even if the price is 50 bps
+    worse than mid". This is where urgency buys execution certainty.
+  * **Zero** = fill at exactly the mid price.
+* The **effective delta at time `now`** is the piecewise-linear
+  interpolation between knots (`startDeltaBps`, the `points`, and
+  `endDeltaBps`).
+* `points.length` is capped at `MAX_SPREAD_CURVE_POINTS = 1024` (an SDK
+  DoS guard; the backend enforces a tighter bound based on order
+  duration and block interval).
+
+`deltaBps`/`startDeltaBps`/`endDeltaBps` are sent as **JSON integers**,
+not strings.
+
+#### Building a curve
+
+The SDK ships two helpers (`turbine-sdk/src/spreads.ts`) that cover the
+common cases.
+
+**`constant(deltaBps)`** — a flat curve that returns the same delta for
+the whole window. This is exactly the old fixed-`midPriceDelta`
+behavior:
+
+```jsonc
+// constant(-8)
+"spreadCurve": { "startDeltaBps": -8, "endDeltaBps": -8, "points": [] }
+```
+
+**`auto({ fastSpreadBps, deltaBps?, yoloBps? })`** — a 4-knot ramp, the
+new **auto-spread** order type. It starts maker-favorable and ramps to a
+positive (pay-to-fill) delta at the end of the window, so the order
+reliably settles within its window instead of going stale:
+
+| `windowBps` | `deltaBps`               |
+|-------------|--------------------------|
+| 0 (start)   | `yoloBps` (default −1000) |
+| 1000        | `−fastSpreadBps`         |
+| 5000        | `fastSpreadBps − deltaBps`|
+| 10000 (end) | `fastSpreadBps + deltaBps`|
+
+* `fastSpreadBps` is **required and positive** (≥ 1) — the target
+  "fast"/AMM spread reached at the end of the window.
+* `deltaBps` (the auto parameter) defaults to
+  `max(1, round(fastSpreadBps * 0.2))`.
+* `yoloBps` defaults to `−1000`.
+* Validation guards (raise on violation):
+  `yoloBps < −fastSpreadBps`; `deltaBps < 2 * fastSpreadBps`;
+  `fastSpreadBps + deltaBps ≤ 9999`.
+
+```jsonc
+// auto({ fastSpreadBps: 10 }) -> deltaBps defaults to 2, yoloBps to -1000
+"spreadCurve": {
+  "startDeltaBps": -1000,
+  "endDeltaBps":   12,
+  "points": [
+    { "windowBps": 1000, "deltaBps": -10 },
+    { "windowBps": 5000, "deltaBps":  8 }
+  ]
+}
+```
+
+Unlike a flat `constant(...)` curve, an `auto` order is designed to
+execute (it ends at a positive, pay-to-fill delta), so it is not a pure
+passive maker order.
 
 ### `startTime` / `endTime`
 
@@ -830,6 +1053,40 @@ Verified on mainnet via production probes on 2026-04-13.
 * **`endTime` must be strictly in the future at submit.** A past
   `endTime` is a local SDK validation failure, not a server one.
 
+## `add_order` wire payload
+
+`POST /api/add_order` takes the `OrderIntent` plus a signed Permit2
+permit. For a standard (non-smart) order the body is:
+
+```jsonc
+{
+  "order": {
+    "owner", "sellToken", "buyToken", "sellAmount", "minBuyAmount",
+    "spreadCurve": { "startDeltaBps": ..., "endDeltaBps": ..., "points": [ ... ] },
+    "startTime", "endTime", "partialFill", "callData", "callDataTarget", "salt"
+  },
+  "signedPermit": {
+    "signature": { "r": "0x...", "s": "0x...", "yParity": true, "v": "0x1c" },
+    "permit": {
+      "details": { "token": "0x...", "amount": "0x...", "expiration": ..., "nonce": ... },
+      "spender": "0xbb3e81c0563dc61719696475f5c7b5e011a73f8a", // turbineSettlerAddress
+      "sigDeadline": "0x..."
+    }
+  }
+}
+```
+
+* The permit **`spender` is the `turbineSettlerAddress`** from
+  `/api/config` (`0xbb3e81c0563dc61719696475f5c7b5e011a73f8a` on
+  v0.114.1). Read it from config rather than hardcoding it.
+* `BigInt` values serialize as `0x`-prefixed hex strings.
+* **Smart orders** (`callData != "0x"` and
+  `callDataTarget != 0x0`) omit `signedPermit` entirely — the body is
+  just `{ "order": { ... } }` — because they handle their own token
+  transfers.
+* The `order_fees` request body is the raw `OrderIntent` on its own (no
+  permit wrapper); see [fees.md](./fees.md).
+
 ## Lifecycle and state tracking
 
 A successful `/api/add_order` returns:
@@ -839,19 +1096,20 @@ A successful `/api/add_order` returns:
 ```
 
 That 32-byte hash is the authoritative ID. Track it through
-`/api/order_states`:
+`/api/order_states` (POST `{ "orderHashes": ["0x..."] }`, returns an
+array of order states):
 
-```json
+```jsonc
 {
-  "hash": "0xe5e7...",
+  "hash": "0x1111...",
   "status": "Active",
   "execution": [
     {
-      "tx_hash":           "0x...",
-      "block_number":      18123456,
-      "sold_amount":       "0x0",
-      "bought_amount":     "0x0",
-      "surplus_buy_amount":"0x0"
+      "txHash":            "0x...",
+      "blockNumber":       18123456,
+      "soldAmount":        "0x0",
+      "boughtAmount":      "0x0",
+      "surplusBuyAmount":  "0x0"
     }
   ]
 }
@@ -859,17 +1117,41 @@ That 32-byte hash is the authoritative ID. Track it through
 
 Notes:
 
-* `status` is **TitleCase**. `"Active"` is the resting state we've
-  observed. Other plausible values (`Filled`, `PartiallyFilled`,
-  `Cancelled`, `Expired`) are inferred from the SDK's TypeScript
-  typing but not yet observed directly.
+* `status` is one of the **`OrderStatus`** values (TitleCase) listed
+  below. `"Active"` is the resting state.
+* In v0.114 the SDK parses execution amounts from **camelCase** fields
+  (`soldAmount`, `boughtAmount`, `surplusBuyAmount`, `txHash`,
+  `blockNumber`). Older deployments returned snake_case
+  (`sold_amount`, `bought_amount`, `surplus_buy_amount`, `tx_hash`,
+  `block_number`); parse tolerantly and accept either. The exact
+  on-the-wire casing for this deployment is not directly verified here —
+  open a PR if you observe it.
 * Execution bigint fields are hex-prefixed. Parse with base-0 int.
-* `surplus_buy_amount` captures positive slippage vs. `minBuyAmount`
+* `surplusBuyAmount` captures positive slippage vs. `minBuyAmount`
   (solver found a better price). For realized-yield analysis, add
-  this to `bought_amount`.
-* The front-end polls `/api/order_states` every 6 seconds with a
+  this to `boughtAmount`.
+* The front-end polls `/api/order_states` on a short interval with a
   client-side mutex that prevents overlapping polls. Mimic that
   pattern.
+
+### `OrderStatus` values (v0.114)
+
+From `types/orders.ts`:
+
+| Status                | Meaning                                            |
+|-----------------------|----------------------------------------------------|
+| `Adding`              | Order is being added (pre-`Active`)                |
+| `Active`              | Resting, open for fills                            |
+| `PartiallyFilled`     | Some of `sellAmount` filled, order still live      |
+| `Filled`              | Fully filled                                       |
+| `PendingCancellation` | Cancellation requested, not yet finalized          |
+| `Canceled`            | Cancelled (note the single-`l` spelling)           |
+| `Expired`             | Past `endTime` without (full) fill                 |
+| `Invalid`             | Order rejected/invalid                             |
+| `Unknown`             | Fallback / unrecognized                            |
+
+`Adding`, `Active`, and `PendingCancellation` are the "pending" states
+in the SDK.
 
 ## Cancellation
 
@@ -878,10 +1160,10 @@ POST /api/cancel_order
 { "orderHash": "0x..." }
 ```
 
-Succeeds with the same hash echoed back. In our testing, cancellation
-took effect immediately server-side. If the solver is already in the
-middle of a fill, we have not observed what happens — open an issue
-if you do.
+Succeeds with the same hash echoed back. Cancellation has been observed
+to take effect immediately server-side. What happens if the solver is
+already mid-fill is not directly verified — open an issue or PR if you
+observe it.
 
 ==============================================================
 # docs/permit2.md
@@ -898,6 +1180,11 @@ deadline.
 
 **The `OrderIntent` is not EIP-712 signed.** The only typed-data
 signature in the Turbine flow is the Permit2 `PermitSingle`.
+
+The `PermitSingle` **spender** is the Turbine Settler. Read its
+address from `GET /api/config` (`turbineSettlerAddress`) rather than
+hardcoding it — it changes on redeploy. As of API `v0.114.1` it is
+`0xbb3e81c0563dc61719696475f5c7b5e011a73f8a`.
 
 ## One-time setup: ERC-20 approval
 
@@ -983,7 +1270,7 @@ permit2 = w3.eth.contract(
 _, _, nonce = permit2.functions.allowance(
     wallet_address,
     sell_token,
-    settler_address,   # 0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac
+    settler_address,   # 0xbb3e81c0563dc61719696475f5c7b5e011a73f8a
 ).call()
 ```
 
@@ -1156,8 +1443,12 @@ Affected fields we've verified:
 
 * `/api/order_fees` → returns strings like `"0x1ef"`,
   `"0x294f9e980"`
-* `/api/order_states` execution entries → `sold_amount`,
-  `bought_amount`, `surplus_buy_amount`
+* `/api/order_states` execution entries → the per-execution amounts
+  (sold / bought / surplus-bought). As of v0.114 these may appear in
+  **camelCase** (`soldAmount`, `boughtAmount`, `surplusBoughtAmount`) in
+  addition to the legacy **snake_case** (`sold_amount`, `bought_amount`,
+  `surplus_buy_amount`). We have not confirmed which casing production
+  emits in every code path, so parse tolerantly — accept both spellings.
 
 Python `int("0x1ef")` without a base raises `ValueError` because
 `int()` defaults to base 10. Parse with **base 0**:
@@ -1255,28 +1546,77 @@ Verified status values:
 * `"Active"` — resting in the book, no fills
 * `"Expired"` — past `endTime`, auto-expired by the solver
 
-Other values we expect from the SDK's TypeScript typing but have
-**not directly observed** yet:
+The full `OrderStatus` enum from the v0.114 SDK typing
+(`types/orders.ts`) is:
 
+* `"Active"` — resting in the book
 * `"Filled"` — fully executed
+* `"PendingCancellation"` — cancellation requested, not yet final
+* `"Canceled"` — cancelled (note: **one** `l`, US spelling)
+* `"Invalid"` — order rejected/invalid
+* `"Expired"` — past `endTime`
+* `"Adding"` — being added, pre-`Active`
 * `"PartiallyFilled"` — some execution history, still active
-* `"Cancelled"` — user or server cancelled
+* `"Unknown"` — fallback
 
-If you observe any of these in the wild, please PR to update this
-file.
+Only `"Active"` and `"Expired"` are **directly observed**; the rest come
+from the SDK typing and have **not all been seen in the wild**. Match
+case-exact (`"Canceled"`, not `"Cancelled"`). If you observe any of the
+unobserved values, please PR to update this file.
 
-## `midPriceDelta` type: integer, not string
+## `spreadCurve` type: object of JSON integers
 
-Unlike most bigint fields in `OrderIntent`, `midPriceDelta` is a
-**JSON integer**, not a string. It fits in an `int16` (`-10000..+10000`)
-and the SDK treats it as a number.
+As of v0.114, the scalar `midPriceDelta` field is **gone**. Orders now
+carry `spreadCurve`, a delta curve over the order's time window. Every
+numeric field inside it is a **JSON integer**, not a string — unlike the
+bigint fields in `OrderIntent`, these are plain numbers the SDK treats as
+such.
+
+Request shape:
 
 ```jsonc
 {
-  "midPriceDelta": -15,   // integer, not "-15"
+  "spreadCurve": {
+    "startDeltaBps": -15,   // integer; delta at windowBps=0 (startTime)
+    "endDeltaBps":   -15,   // integer; delta at windowBps=10000 (endTime)
+    "points": [             // interior knots, may be empty
+      { "windowBps": 5000, "deltaBps": -8 }
+    ]
+  },
   ...
 }
 ```
+
+* `windowBps` is **normalized order-window time**: `0` = `startTime`,
+  `10000` = `endTime`. Interior knots live in `[1, 9999]`
+  (`MIN_WINDOW_BPS=1`, `MAX_WINDOW_BPS=9999`).
+* `deltaBps` is **signed**, 1 unit = 1 basis point (0.01%), domain
+  `[MIN_DELTA_BPS=-10000, MAX_DELTA_BPS=9999]`. Negative = maker price
+  better than mid.
+* The effective delta at any time `now` is the piecewise-linear
+  interpolation between the surrounding knots.
+* `points` is capped at `MAX_SPREAD_CURVE_POINTS = 1024` (an SDK DoS
+  guard; the backend enforces a tighter bound based on order duration and
+  block interval).
+
+The two values that previously would have been a single `midPriceDelta`
+are now expressed via the SDK's `constant(deltaBps)` builder, which emits
+a flat curve — `{ startDeltaBps: d, endDeltaBps: d, points: [] }` — that
+reproduces the old fixed-delta behavior exactly. A second builder,
+`auto({ fastSpreadBps, deltaBps?, yoloBps? })`, emits a 4-knot ramp (the
+"auto-spread" order type). The curve-construction semantics are
+documented elsewhere; from a wire perspective both builders just produce
+the `spreadCurve` object above.
+
+### Resolved curve in responses
+
+When `spreadCurve` comes back inside an order's `orderDetails` (read
+path), the backend resolves it to absolute Unix seconds: `startSecs`,
+`endSecs`, plus `startDeltaBps`/`endDeltaBps` and a `points` array whose
+entries use `timeSecs` (absolute seconds) instead of the request's
+`windowBps`. We have **not exhaustively verified** every field of the
+resolved form against production — if you observe a divergence, please PR
+to update this file.
 
 ## `sellAmount` / `minBuyAmount` type: string
 
@@ -1409,40 +1749,67 @@ documented anywhere on docs.propellerheads.xyz at the time of
 writing; the only signal in the app UI is a tooltip that says
 `"Includes a platform fee of 0.01%"` rounded to two decimals.
 
-**The actual fee: ~0.99 bps (0.0099%) of the mid-price notional, flat
-regardless of size, side, or `midPriceDelta`.**
+**The authoritative source of truth for the fee is the
+`POST /api/order_fees` endpoint** (see below). It returns the exact
+platform fee the server would charge for a given order, denominated
+in buy-token atomic units. Do not hardcode a fee rate — quote it per
+order before submitting.
 
-This page documents how we measured that and how it interacts with
-spread.
+> **Historical note (unverified for v0.114).** On an earlier Turbine
+> deployment, the fee was empirically observed to be approximately
+> **0.99 bps (0.0099%) of the mid-price notional**, flat regardless of
+> size, side, or the spread the order requested. That observation was
+> made during the Turbine Alpha private beta and has **not** been
+> re-verified against the current `v0.114.1` deployment. Treat any
+> fixed fee number as historical until you reproduce it yourself via
+> `/api/order_fees`.
 
-## Measuring the fee
+This page documents how to query the fee from the API and how it
+interacts with the order's spread.
+
+## Querying the fee
 
 `POST /api/order_fees` is a quote-only endpoint: you send a full
-`OrderIntent` (without `signedPermit`) and the server returns the
-platform fee it would charge, denominated in **buy-token atomic
-units**, as a hex-prefixed bigint string.
+`OrderIntent` (the raw order body, without `signedPermit`) and the
+server returns the platform fee it would charge, denominated in
+**buy-token atomic units**, as a hex-prefixed bigint string.
 
-We ran this against production on 2026-04-13 with a sweep over:
+This is the canonical way to obtain the fee for any prospective
+order. Because the response is in buy-token atomic units, divide by
+the buy token's decimals to convert to a human-readable amount, and
+optionally divide by `minBuyAmount` to express it as a ratio of the
+order notional.
 
-* 7 sizes: $5, $20, $35, $100, $200, $500, $1000
-* 4 deltas: `-5`, `-10`, `-20`, `-30` bps
-* Both sides (sell WETH→USDC, buy USDC→WETH)
+### Example response shape
 
-ETH mid-price at the time: $2193.45.
+> The response is a single fee value in buy-token atomic units as a
+> hex-prefixed bigint string. The exact JSON envelope is not asserted
+> here; inspect a live `/api/order_fees` response for the current
+> deployment. If you observe a different shape, please open a PR.
 
-### Selected sell-side results (WETH → USDC, buy token USDC)
+### Historical measurement (Alpha beta — unverified for v0.114)
 
-| Size | `sellAmount` (WETH atomic) | `minBuyAmount` (USDC atomic) | `delta_bps` | Fee (USDC atomic) | Fee / size_usd |
-|---|---|---|---|---|---|
-| $5    | 2,279,000,000,000,000 | 4,500,000   | −10 | 495     | 0.0099% |
-| $20   | 9,118,000,000,000,000 | 18,000,000  | −10 | 1,980   | 0.0099% |
-| $35   | 15,957,000,000,000,000 | 31,500,000 | −10 | 3,465   | 0.0099% |
-| $100  | 45,590,000,000,000,000 | 90,000,000 | −10 | 9,900   | 0.0099% |
-| $200  | 91,180,000,000,000,000 | 180,000,000 | −10 | 19,800  | 0.0099% |
-| $500  | 227,950,000,000,000,000 | 450,000,000 | −10 | 49,500  | 0.0099% |
-| $1000 | 455,900,000,000,000,000 | 900,000,000 | −10 | 99,000  | 0.0099% |
+The numbers below were collected against the **old** deployment on
+2026-04-13 by sweeping `/api/order_fees` over a range of sizes,
+spreads, and both sides (sell WETH→USDC, buy USDC→WETH). They are
+retained for illustration of the fee's *structure*, not as a current
+rate. Re-run your own sweep before relying on any of them.
 
-### Selected buy-side results (USDC → WETH, buy token WETH)
+ETH mid-price at the time of that sweep: $2193.45.
+
+#### Selected sell-side results (WETH → USDC, buy token USDC)
+
+| Size | `sellAmount` (WETH atomic) | `minBuyAmount` (USDC atomic) | Fee (USDC atomic) | Fee / size_usd |
+|---|---|---|---|---|
+| $5    | 2,279,000,000,000,000 | 4,500,000   | 495     | 0.0099% |
+| $20   | 9,118,000,000,000,000 | 18,000,000  | 1,980   | 0.0099% |
+| $35   | 15,957,000,000,000,000 | 31,500,000 | 3,465   | 0.0099% |
+| $100  | 45,590,000,000,000,000 | 90,000,000 | 9,900   | 0.0099% |
+| $200  | 91,180,000,000,000,000 | 180,000,000 | 19,800  | 0.0099% |
+| $500  | 227,950,000,000,000,000 | 450,000,000 | 49,500  | 0.0099% |
+| $1000 | 455,900,000,000,000,000 | 900,000,000 | 99,000  | 0.0099% |
+
+#### Selected buy-side results (USDC → WETH, buy token WETH)
 
 | Size | `sellAmount` (USDC atomic) | `minBuyAmount` (WETH atomic) | Fee (WETH atomic) | Fee / size_usd |
 |---|---|---|---|---|
@@ -1451,81 +1818,92 @@ ETH mid-price at the time: $2193.45.
 | $200  | 200,000,000   | 82,040,000,000,000,000  | 9,026,875,470,148   | 0.0099% |
 | $1000 | 1,000,000,000 | 410,200,000,000,000,000 | 45,134,377,350,748  | 0.0099% |
 
-### Observations
+### Observations (from the historical sweep)
 
-1. **Fee is linear in swap size.** Sell $5 → 495 atomic USDC,
+These properties held on the old deployment and may or may not still
+hold; verify with your own `/api/order_fees` calls.
+
+1. **Fee was linear in swap size.** Sell $5 → 495 atomic USDC,
    sell $1000 → 99,000 atomic USDC. Slope = 99 atomic per $1.
-2. **Fee is independent of `midPriceDelta`.** All four tested delta
-   values (−5, −10, −20, −30) return the exact same fee for a given
-   size. The `midPriceDelta` is a pure filter on execution price, not
-   an input to fee calculation.
-3. **Fee is symmetric across sides.** Selling USDC vs selling WETH
-   yields the same 0.0099% ratio.
-4. **Flat 0.99 bps of the mid-price expected value.** Every row is
+2. **Fee was independent of the requested spread.** Sweeping the
+   order's delta returned the exact same fee for a given size. The
+   spread an order requests is a filter on execution price, not an
+   input to fee calculation.
+3. **Fee was symmetric across sides.** Selling USDC vs selling WETH
+   yielded the same 0.0099% ratio.
+4. **Flat ~0.99 bps of the mid-price expected value.** Every row was
    within 0.001 bps of the same number.
 
-## Interpretation
+## Interpretation: fee vs. requested spread
 
-The frontend code in `TurbineOptions.tsx` computes:
+In v0.114, an order no longer carries a single fixed `midPriceDelta`
+scalar. Instead it carries a `spreadCurve` — a piecewise-linear curve
+of signed `deltaBps` values over the order's normalized time window
+(see the orders documentation). Each `deltaBps` is in basis points
+(1 unit = 1 bp = 0.01%); negative values are maker-favorable
+("earn"), positive values are pay-to-fill.
 
-```javascript
-const feePercent = new Decimal(fee.toString())
-    .div(intent.minBuyAmount)
-    .times(100);
-```
+The platform fee is independent of the curve you request. It is
+**deducted from the order creator's realized price improvement**. The
+app frontend computes a fee ratio from the `/api/order_fees` value
+divided by `minBuyAmount`, then subtracts it from the order's
+effective delta to produce the displayed "Your spread" number.
 
-and then **subtracts** `feePercent` from the user's
-`midPriceDelta.deltaPercent` to produce the displayed "Your spread"
-number:
+Concretely, if your order is effectively running at `-10 bps`
+(maker-favorable), the realized spread after the platform fee is
+roughly `10 - ~1 = ~9 bps` (using the historical ~0.99 bps figure as
+an illustration; quote the real fee per order). For a pay-to-fill
+order at `+50 bps`, the same fee structure widens your effective cost
+from 50 bps to ~51 bps.
 
-```javascript
-const spreadPercent = feePercent !== undefined
-    ? turbineOptions.delta.deltaPercent.minus(feeRatio)
-    : turbineOptions.delta.deltaPercent;
-```
+## Impact for narrow-spread strategies
 
-i.e., the platform fee is **deducted from the order creator's
-realized price improvement**. For a market maker setting
-`midPriceDelta = -10 bps`, the actual realized spread is
-`10 - ~1 = ~9 bps`. For a taker with `midPriceDelta = +50 bps`, the
-fee is the same structure — it widens your effective cost from 50
-bps to ~51 bps.
+If a strategy earns on a small maker-favorable delta, the platform
+fee is a fixed subtraction from each fill's realized edge. Using the
+historical ~1 bp figure purely for illustration of the *shape* of the
+impact (not as a current rate):
 
-## Impact table for market making
-
-If your strategy sets `midPriceDelta = -X bps` (passive MM / earn
-side), your **net realized edge per fill** is approximately:
-
-| Set spread `X` | Platform fee | Net realized edge | Fee as % of spread |
+| Effective spread | Illustrative fee | Net realized edge | Fee as % of spread |
 |---|---|---|---|
-|  5 bps | 1 bp | **~4 bps** | 20% cut |
-| 10 bps | 1 bp | **~9 bps** | 10% cut |
-| 15 bps | 1 bp | ~14 bps | 6.7% cut |
-| 20 bps | 1 bp | ~19 bps | 5.0% cut |
-| 30 bps | 1 bp | ~29 bps | 3.3% cut |
-| 50 bps | 1 bp | ~49 bps | 2.0% cut |
+|  5 bps | ~1 bp | ~4 bps | ~20% cut |
+| 10 bps | ~1 bp | ~9 bps | ~10% cut |
+| 15 bps | ~1 bp | ~14 bps | ~6.7% cut |
+| 20 bps | ~1 bp | ~19 bps | ~5.0% cut |
+| 30 bps | ~1 bp | ~29 bps | ~3.3% cut |
+| 50 bps | ~1 bp | ~49 bps | ~2.0% cut |
 
-Small-spread strategies are disproportionately hurt by the fee.
-Below ~5 bps the fee eats so much of the edge that unless fill rate
-is extremely high, the bucket is unprofitable in expectation.
+The takeaway is structural, not numeric: a fixed per-fill fee
+disproportionately hurts the narrowest-spread buckets. Below a few
+bps of effective spread, the fee consumes a large fraction of the
+edge, so such buckets need a very high fill rate to remain profitable
+in expectation. Quote the live fee from `/api/order_fees` and plug
+your own numbers into this calculation.
 
-## Computing the fee locally
+## Estimating the fee offline
 
-Because the fee is a simple linear function of size, you don't have
-to call `/api/order_fees` for every prospective order. An offline
-estimate is accurate to within rounding noise:
+You generally do not need to call `/api/order_fees` for every
+prospective order for UI display or pre-trade feasibility checks — if
+you have characterized the fee's structure on the current deployment,
+a linear estimate is accurate to within rounding noise. **Always use
+`/api/order_fees` for the authoritative value before actually
+submitting**, and re-derive the rate below from your own `order_fees`
+sweep rather than assuming the historical constant still holds.
 
 ```python
 def estimate_fee_atomic(sell_amount_atomic, sell_token_decimals,
-                       mid_price_usd_per_eth, buy_token_decimals):
-    """Returns the estimated platform fee in buy-token atomic units."""
-    FEE_BPS = 0.99          # 0.0099%
+                        mid_price_usd_per_eth, buy_token_decimals,
+                        fee_bps):
+    """Returns the estimated platform fee in buy-token atomic units.
+
+    `fee_bps` must be derived from your own /api/order_fees sweep on
+    the current deployment — do not assume a fixed rate.
+    """
     # Convert the sell amount to USD at the mid
     sell_usd = sell_amount_atomic / (10 ** sell_token_decimals)
     if sell_token_decimals != 6:          # assume non-USDC is ETH-priced
         sell_usd *= mid_price_usd_per_eth
     # Fee in USD
-    fee_usd = sell_usd * FEE_BPS / 10_000
+    fee_usd = sell_usd * fee_bps / 10_000
     # Fee in buy-token atomic units
     if buy_token_decimals == 6:           # USDC
         return int(fee_usd * 10 ** 6)
@@ -1533,41 +1911,31 @@ def estimate_fee_atomic(sell_amount_atomic, sell_token_decimals,
         return int((fee_usd / mid_price_usd_per_eth) * 10 ** 18)
 ```
 
-Use this for UI display and pre-trade feasibility checks; use
-`/api/order_fees` for the authoritative value before actually
-submitting.
+## Accounting for the fee in yield analysis
 
-## Post-run yield analysis
+When analysing realized yield from execution records, subtract the
+platform fee (the exact value from `/api/order_fees` for the quoted
+intent, or your measured rate) from whatever raw spread the execution
+appears to show. Otherwise mean realized yield is over-reported.
 
-When analysing realized yield from a `fills.csv`, **subtract 1 bp**
-(or the exact fee for the quoted intent) from whatever raw
-spread the execution appears to show. Otherwise your "mean realized
-yield" will be over-reported.
-
-A simple correction:
-
-```python
-# In your bucket-level analysis:
-net_yield_bps = raw_realized_yield_bps - 0.99
-```
-
-If you want to be exact, include the fee in your fill-level records
-at submit time (grab it from `/api/order_fees` during the build
-phase) and compute `realized - fee` at analysis time.
+For exact accounting, capture the fee in your fill-level records at
+submit time — grab it from `/api/order_fees` while building the order
+— and compute `realized - fee` at analysis time.
 
 ## Caveats
 
-* The 0.99 bps figure was measured **2026-04-13 during Turbine Alpha
-  private beta**. PropellerHeads can change this at any time. Re-run
-  the probe against `/api/order_fees` before making production
-  decisions.
-* We have not verified whether the fee differs for LP (`add_liquidity`)
-  or for smart orders (non-empty `callData`). The measurement above
-  covers plain-intent orders only.
-* The fee is deducted from the order creator's side. For an MM
-  sending passive orders and a retail user sending taker orders that
-  match against them, both sides may pay — we have not conducted a
-  matched-fill experiment to verify. If you run one, please PR the
+* Any fixed fee figure on this page (e.g. ~0.99 bps) was measured
+  during the **Turbine Alpha private beta on an earlier deployment**
+  and is **unverified for `v0.114.1`**. PropellerHeads can change the
+  fee at any time. Query `/api/order_fees` against the current
+  deployment before making production decisions.
+* It is not verified whether the fee differs for LP
+  (`add_liquidity`) or for smart orders (non-empty `callData`). The
+  historical measurement covered plain-intent orders only.
+* The fee is deducted from the order creator's side. For a maker
+  sending passive orders and a taker sending orders that match
+  against them, both sides may pay — a matched-fill experiment to
+  confirm this has not been documented. If you run one, please PR the
   results.
 
 ==============================================================
@@ -1576,8 +1944,8 @@ phase) and compute `realized - fee` at analysis time.
 
 # Integration guide
 
-Pragmatic notes on building a client — the things we'd have saved
-time on if we had read this first.
+Pragmatic notes on building a client — the things that save time
+if you read them first.
 
 ## Setup checklist
 
@@ -1605,13 +1973,13 @@ Before your client makes a single API call:
 ## Startup sequence
 
 ```
-acquire flock (prevent dual instance)
+acquire single-instance lock (prevent dual instance)
        │
        ▼
-load wallet (decrypt keystore)
+load your signing key
        │
        ▼
-open/replay durable journal
+open/replay any durable state you keep locally
        │
        ▼
 GET /api/status                 ← sanity ping
@@ -1620,15 +1988,9 @@ GET /api/status                 ← sanity ping
 GET /api/config                 ← with pin verification (fail fast)
        │
        ▼
-fetch live price from Binance   ← for equity baseline
-       │
-       ▼
-read ERC-20 balances on-chain   ← USDC + WETH of wallet
+read ERC-20 balances on-chain   ← e.g. USDC + WETH of your wallet
 read ERC-20 allowances on-chain ← to Permit2
-read Permit2 executor balance   ← soft warning if < 0.01 ETH
-       │
-       ▼
-compute initial_equity_usd      ← baseline for drawdown stop
+read executor balance on-chain  ← soft warning if low (see below)
        │
        ▼
 enter main loop
@@ -1638,10 +2000,10 @@ enter main loop
 
 ```
 every tick (e.g. 15-30 s):
-    refresh oracle (Binance mid)
-    risk checks       ← drawdown, api failures, oracle staleness
+    refresh your price reference (if your strategy needs one)
+    run your own risk checks
     poll open orders  ← POST /api/order_states with all live hashes
-    place missing slots according to strategy
+    place/replace orders according to your strategy
 
 every ~5 min:
     reconcile on-chain state (balances + ERC-20 allowances)
@@ -1650,6 +2012,9 @@ every ~5 min:
 every 6 s (separate cadence if you want faster fill detection):
     poll /api/order_states again
 ```
+
+Add whatever risk checks fit your own strategy. The API does
+not enforce these for you.
 
 Follow the front-end's pattern of **serializing concurrent polls**
 with a mutex. Two overlapping `/api/order_states` calls on the same
@@ -1678,23 +2043,33 @@ def ensure_authenticated(self):
 
 One fill-cycle for an intent looks like:
 
-1. Build the `OrderIntent` (see [orders.md](orders.md)).
+1. Build the `OrderIntent` (see [orders.md](orders.md)), including its
+   `spreadCurve` (the per-order delta curve that replaced the old
+   scalar `midPriceDelta` — flat via the SDK's `constant(deltaBps)`,
+   or a ramp via `auto({fastSpreadBps, ...})`). See [orders.md](orders.md)
+   for the curve shape.
 2. Read the current Permit2 nonce on-chain for
-   `(wallet, sellToken, settler)`.
-3. Build and sign the `PermitSingle` EIP-712 typed data.
+   `(wallet, sellToken, settler)`. The settler is the
+   `turbineSettlerAddress` from `/api/config`
+   (`0xbb3e81c0563dc61719696475f5c7b5e011a73f8a` at time of writing) —
+   read it from config rather than hard-coding it.
+3. Build and sign the `PermitSingle` EIP-712 typed data, using the
+   settler above as the permit `spender`.
 4. Convert signature to `{r, s, yParity: bool, v}`.
 5. POST `/api/add_order` with `{order, signedPermit}`.
 6. On `{orderHash: "0x..."}`, start polling that hash via
    `/api/order_states`.
 7. On `status = "Filled"` (TitleCase!), consider the order complete.
-   On `"Cancelled"` or `"Expired"`, drop it and free the slot.
+   On `"Canceled"` or `"Expired"`, drop it and free the slot. Note an
+   order may report `"Adding"` (being added, pre-`Active`) or
+   `"PartiallyFilled"` before it reaches a terminal state — see the
+   full `OrderStatus` enum in [orders.md](orders.md).
 8. If you need to cancel early, POST `/api/cancel_order` with the
    hash.
 
-The JS SDK template in `turbineClient.ts` follows this exactly, plus
-handles smart-order callbacks and batch submissions. Our Python
-reference in [examples/minimal_client.py](../examples/minimal_client.py)
-implements the non-smart path.
+The JS SDK's `turbineClient.ts` follows this exactly, plus handles
+smart-order callbacks and batch submissions, and exposes the
+`spreadCurve` builders (`constant` / `auto`).
 
 ## State tracking
 
@@ -1704,17 +2079,20 @@ Keep a local ledger that associates every submitted order with:
   half-completed submits)
 * `order_hash` (assigned by the server)
 * `side` (buy/sell)
-* `spread_bps` (what you asked for)
-* `eth_price_usd` (mid at submit time)
+* the `spreadCurve` you submitted (so you know the delta you asked for)
+* your price reference at submit time (if your accounting needs it)
 * `expected_buy_atomic` (what you'd get at mid)
-* `fee_atomic` (from `/api/order_fees`, for realized-yield
-  computation)
+* `fee_atomic` (from `/api/order_fees`)
 * current `status` from polling
-* `executed_sell_amount` / `executed_buy_amount` from the latest poll
+* the executed amounts from the latest poll. The execution fields may
+  appear either snake_case (`executed_sell_amount` /
+  `executed_buy_amount`) or camelCase (`soldAmount` / `boughtAmount` /
+  `surplusBoughtAmount`) — handle both tolerantly.
 
-Use that to compute realized PnL, fill rates per spread bucket, and
-time-to-fill distributions. The fee field in particular is essential
-for any honest yield attribution — see [fees.md](fees.md).
+Use that ledger to drive whatever accounting your strategy needs
+(realized PnL, fill rates, time-to-fill). The fee field from
+`/api/order_fees` is needed for any honest yield attribution — see
+[fees.md](fees.md).
 
 ## Error handling
 
@@ -1819,13 +2197,17 @@ PR.
 
 ## What we especially want
 
-1. **New status enum values.** `/api/order_states` returns
-   `"Active"` for resting orders. We haven't directly observed
-   values for Filled, Partially Filled, Cancelled, or Expired — if
-   you see them, please PR with the exact string.
-2. **Fee changes.** The ~0.99 bps figure in [docs/fees.md](docs/fees.md)
-   was measured during Alpha. Re-run the probe and open a PR if it
-   drifts.
+1. **Status enum transitions.** The documented `OrderStatus` set is
+   `Active`, `Filled`, `PendingCancellation`, `Canceled`, `Invalid`,
+   `Expired`, `Adding`, `PartiallyFilled`, `Unknown`. We have not
+   directly observed every transition value live — if you capture a
+   real `/api/order_states` response showing one of the rarer states,
+   please PR with the exact payload.
+2. **Fees.** `/api/order_fees` is the source of truth (it returns the
+   fee in buy-token atomic units). Any older bps figure in
+   [docs/fees.md](docs/fees.md) is a historical, unverified Alpha
+   observation — re-run the probe against the current deployment and
+   PR with what you measure.
 3. **New endpoints.** If PropellerHeads ship official Turbine docs
    that contradict anything here, PR a correction.
 4. **Error shapes.** We documented two observed error response
@@ -1849,7 +2231,7 @@ PR.
 Minimal reproducer for the fee measurement:
 
 ```python
-from examples.minimal_client import MinimalTurbineClient, OrderIntent, random_salt, WETH, USDC
+from examples.minimal_client import MinimalTurbineClient, OrderIntent, constant, random_salt, WETH, USDC
 import os, time
 from eth_account import Account
 
@@ -1863,7 +2245,9 @@ intent = OrderIntent(
     sell_token=WETH, buy_token=USDC,
     sell_amount=int(0.016 * 10**18),
     min_buy_amount=33 * 10**6,
-    mid_price_delta_bps=-10,
+    # v0.114 replaced the scalar midPriceDelta with a spreadCurve.
+    # constant(-10) is a flat curve == the old fixed -10 bps delta.
+    spread_curve=constant(-10),
     start_time=now, end_time=now + 3600,
     salt=random_salt(),
 )
@@ -1871,4 +2255,4 @@ print("fee:", client.quote_fee(intent))
 ```
 
 `/api/order_fees` does not actually place an order — it is safe to
-run for as many sizes / deltas / sides as you want.
+run for as many sizes / spread curves / sides as you want.

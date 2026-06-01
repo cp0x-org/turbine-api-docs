@@ -23,8 +23,12 @@ Affected fields we've verified:
 
 * `/api/order_fees` → returns strings like `"0x1ef"`,
   `"0x294f9e980"`
-* `/api/order_states` execution entries → `sold_amount`,
-  `bought_amount`, `surplus_buy_amount`
+* `/api/order_states` execution entries → the per-execution amounts
+  (sold / bought / surplus-bought). As of v0.114 these may appear in
+  **camelCase** (`soldAmount`, `boughtAmount`, `surplusBoughtAmount`) in
+  addition to the legacy **snake_case** (`sold_amount`, `bought_amount`,
+  `surplus_buy_amount`). We have not confirmed which casing production
+  emits in every code path, so parse tolerantly — accept both spellings.
 
 Python `int("0x1ef")` without a base raises `ValueError` because
 `int()` defaults to base 10. Parse with **base 0**:
@@ -122,28 +126,77 @@ Verified status values:
 * `"Active"` — resting in the book, no fills
 * `"Expired"` — past `endTime`, auto-expired by the solver
 
-Other values we expect from the SDK's TypeScript typing but have
-**not directly observed** yet:
+The full `OrderStatus` enum from the v0.114 SDK typing
+(`types/orders.ts`) is:
 
+* `"Active"` — resting in the book
 * `"Filled"` — fully executed
+* `"PendingCancellation"` — cancellation requested, not yet final
+* `"Canceled"` — cancelled (note: **one** `l`, US spelling)
+* `"Invalid"` — order rejected/invalid
+* `"Expired"` — past `endTime`
+* `"Adding"` — being added, pre-`Active`
 * `"PartiallyFilled"` — some execution history, still active
-* `"Cancelled"` — user or server cancelled
+* `"Unknown"` — fallback
 
-If you observe any of these in the wild, please PR to update this
-file.
+Only `"Active"` and `"Expired"` are **directly observed**; the rest come
+from the SDK typing and have **not all been seen in the wild**. Match
+case-exact (`"Canceled"`, not `"Cancelled"`). If you observe any of the
+unobserved values, please PR to update this file.
 
-## `midPriceDelta` type: integer, not string
+## `spreadCurve` type: object of JSON integers
 
-Unlike most bigint fields in `OrderIntent`, `midPriceDelta` is a
-**JSON integer**, not a string. It fits in an `int16` (`-10000..+10000`)
-and the SDK treats it as a number.
+As of v0.114, the scalar `midPriceDelta` field is **gone**. Orders now
+carry `spreadCurve`, a delta curve over the order's time window. Every
+numeric field inside it is a **JSON integer**, not a string — unlike the
+bigint fields in `OrderIntent`, these are plain numbers the SDK treats as
+such.
+
+Request shape:
 
 ```jsonc
 {
-  "midPriceDelta": -15,   // integer, not "-15"
+  "spreadCurve": {
+    "startDeltaBps": -15,   // integer; delta at windowBps=0 (startTime)
+    "endDeltaBps":   -15,   // integer; delta at windowBps=10000 (endTime)
+    "points": [             // interior knots, may be empty
+      { "windowBps": 5000, "deltaBps": -8 }
+    ]
+  },
   ...
 }
 ```
+
+* `windowBps` is **normalized order-window time**: `0` = `startTime`,
+  `10000` = `endTime`. Interior knots live in `[1, 9999]`
+  (`MIN_WINDOW_BPS=1`, `MAX_WINDOW_BPS=9999`).
+* `deltaBps` is **signed**, 1 unit = 1 basis point (0.01%), domain
+  `[MIN_DELTA_BPS=-10000, MAX_DELTA_BPS=9999]`. Negative = maker price
+  better than mid.
+* The effective delta at any time `now` is the piecewise-linear
+  interpolation between the surrounding knots.
+* `points` is capped at `MAX_SPREAD_CURVE_POINTS = 1024` (an SDK DoS
+  guard; the backend enforces a tighter bound based on order duration and
+  block interval).
+
+The two values that previously would have been a single `midPriceDelta`
+are now expressed via the SDK's `constant(deltaBps)` builder, which emits
+a flat curve — `{ startDeltaBps: d, endDeltaBps: d, points: [] }` — that
+reproduces the old fixed-delta behavior exactly. A second builder,
+`auto({ fastSpreadBps, deltaBps?, yoloBps? })`, emits a 4-knot ramp (the
+"auto-spread" order type). The curve-construction semantics are
+documented elsewhere; from a wire perspective both builders just produce
+the `spreadCurve` object above.
+
+### Resolved curve in responses
+
+When `spreadCurve` comes back inside an order's `orderDetails` (read
+path), the backend resolves it to absolute Unix seconds: `startSecs`,
+`endSecs`, plus `startDeltaBps`/`endDeltaBps` and a `points` array whose
+entries use `timeSecs` (absolute seconds) instead of the request's
+`windowBps`. We have **not exhaustively verified** every field of the
+resolved form against production — if you observe a divergence, please PR
+to update this file.
 
 ## `sellAmount` / `minBuyAmount` type: string
 

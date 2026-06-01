@@ -10,6 +10,11 @@ deadline.
 **The `OrderIntent` is not EIP-712 signed.** The only typed-data
 signature in the Turbine flow is the Permit2 `PermitSingle`.
 
+The `PermitSingle` **spender** is the Turbine Settler. Read its
+address from `GET /api/config` (`turbineSettlerAddress`) rather than
+hardcoding it — it changes on redeploy. As of API `v0.114.1` it is
+`0xbb3e81c0563dc61719696475f5c7b5e011a73f8a`.
+
 ## One-time setup: ERC-20 approval
 
 Before you can trade a token through Turbine, you need a standard
@@ -94,7 +99,7 @@ permit2 = w3.eth.contract(
 _, _, nonce = permit2.functions.allowance(
     wallet_address,
     sell_token,
-    settler_address,   # 0x49e9a8ea9b6c05d5b2307538d159350a5aea73ac
+    settler_address,   # 0xbb3e81c0563dc61719696475f5c7b5e011a73f8a
 ).call()
 ```
 
